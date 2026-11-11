@@ -1,0 +1,299 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>PreferenceSpecifiers</key>
+    <array>
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>Title</key>
+            <string>Phone as Controller (When No Controller Is Connected)</string>
+            <key>FooterText</key>
+            <string>Gyro: tilt the phone for Switch handheld motion controls (such as tilt aiming in Splatoon); the sensor only runs when the game needs motion. Rumble: game rumble plays through the phone’s motor. A connected controller takes over automatically.</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>Phone Gyro</string>
+            <key>Key</key>
+            <string>S2APhoneGyro</string>
+            <key>DefaultValue</key>
+            <true/>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>Phone Haptics</string>
+            <key>Key</key>
+            <string>S2APhoneHaptics</string>
+            <key>DefaultValue</key>
+            <true/>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>Title</key>
+            <string>Switch Mode (Restart the Game to Apply)</string>
+            <key>FooterText</key>
+            <string>Docked mode is how the Switch runs in its dock; when off, Handheld mode is used. The actual resolution and quality are up to the game; this is set separately from the compatible / high-performance run mode. Takes effect on next launch.</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>Docked Mode</string>
+            <key>Key</key>
+            <string>S2ADockedMode</string>
+            <key>DefaultValue</key>
+            <false/>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>Title</key>
+            <string>Graphics (Restart the Game to Apply)</string>
+            <key>FooterText</key>
+            <string>Scales relative to the game’s current render size and keeps widescreen. A lower scale reduces graphics load; a higher scale improves sharpness but uses more power and memory. Some textures are still processed at the game’s original size.</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSMultiValueSpecifier</string>
+            <key>Title</key>
+            <string>Render Resolution Scale</string>
+            <key>Key</key>
+            <string>S2AResolutionScale</string>
+            <key>DefaultValue</key>
+            <string>1</string>
+            <key>Titles</key>
+            <array><string>0.5×</string><string>0.75×</string><string>1× (Native)</string><string>1.5×</string><string>2×</string></array>
+            <key>Values</key>
+            <array><string>0.5</string><string>0.75</string><string>1</string><string>1.5</string><string>2</string></array>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>FooterText</key>
+            <string>Reduces jagged edges in the final game picture; may also soften text and detail. Off still keeps the game’s own anti-aliasing.</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSMultiValueSpecifier</string>
+            <key>Title</key>
+            <string>Anti-Aliasing</string>
+            <key>Key</key>
+            <string>S2AAntiAliasing</string>
+            <key>DefaultValue</key>
+            <string>None</string>
+            <key>Titles</key>
+            <array><string>Off</string><string>SMAA Medium</string><string>SMAA High</string></array>
+            <key>Values</key>
+            <array><string>None</string><string>SmaaMedium</string><string>SmaaHigh</string></array>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>FooterText</key>
+            <string>Used to scale the game picture to the screen; doesn’t change the internal render resolution.</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSMultiValueSpecifier</string>
+            <key>Title</key>
+            <string>Scaling Filter</string>
+            <key>Key</key>
+            <string>S2AScalingFilter</string>
+            <key>DefaultValue</key>
+            <string>Bilinear</string>
+            <key>Titles</key>
+            <array><string>Bilinear (Smooth)</string><string>Nearest Neighbor (Crisp Pixels)</string></array>
+            <key>Values</key>
+            <array><string>Bilinear</string><string>Nearest</string></array>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>FooterText</key>
+            <string>Sets a frame rate cap for the game picture; doesn’t unlock the game’s own frame rate limit. The actual frame rate also depends on the game and the screen’s refresh rate.</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSMultiValueSpecifier</string>
+            <key>Title</key>
+            <string>Frame Rate Limit</string>
+            <key>Key</key>
+            <string>S2AFrameRateLimit</string>
+            <key>DefaultValue</key>
+            <string>0</string>
+            <key>Titles</key>
+            <array><string>30 FPS</string><string>60 FPS</string><string>120 FPS</string><string>Unlimited</string></array>
+            <key>Values</key>
+            <array><string>30</string><string>60</string><string>120</string><string>0</string></array>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>Title</key>
+            <string>Controller</string>
+            <key>FooterText</key>
+            <string>When on, you can connect a Switch 2 Pro Controller in game and use its buttons, HD rumble and motion controls. Hold the SYNC button on top of the controller to connect. This setting applies only to this app.</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>Enable Switch 2 Pro Controller Support</string>
+            <key>Key</key>
+            <string>S2ANS2ProAdapterEnabled</string>
+            <key>DefaultValue</key>
+            <false/>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>Title</key>
+            <string>Saves</string>
+            <key>FooterText</key>
+            <string>Save in the game first, then close and reopen the app. Save management opens before the game starts, where you can export a backup or import a .s2asave file from a Mac. Your current save is kept before restoring. The switch turns off once the game starts.</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>Manage Saves on Next Open</string>
+            <key>Key</key>
+            <string>S2ASaveManageOnOpen</string>
+            <key>DefaultValue</key>
+            <false/>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>Title</key>
+            <string>Diagnostics</string>
+            <key>FooterText</key>
+            <string>Turn this on and switch back to the game: S2Arm packs the logs from the last few runs into a diagnostics bundle and opens the share sheet (AirDrop, Save to Files, WeChat). The bundle contains no saves, keys or game files. The switch turns off after export. You can also export in game by holding four fingers on the screen for 1.5 seconds.</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>Export Diagnostics When the App Opens</string>
+            <key>Key</key>
+            <string>S2ADiagExportOnOpen</string>
+            <key>DefaultValue</key>
+            <false/>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>Title</key>
+            <string>Development</string>
+            <key>FooterText</key>
+            <string>The S2Arm diagnostics overlay shows the target frame rate, slow-frame ratio, graphics path, first-use compilation, audio and build ID. Metal HUD shows the frame rate, GPU time and a frame-interval graph, for manual viewing only; while it’s on, screenshots, frame capture, autoplay and full-screen checks are unavailable. Takes effect the next time the app starts. Metal HUD is for apps you build and install on a development device yourself.</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>S2Arm Diagnostics Overlay</string>
+            <key>Key</key>
+            <string>S2ADevHUD</string>
+            <key>DefaultValue</key>
+            <false/>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>Metal HUD</string>
+            <key>Key</key>
+            <string>MetalHUDForceEnabled</string>
+            <key>DefaultValue</key>
+            <false/>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>Title</key>
+            <string>About This Build (Read-Only)</string>
+            <key>FooterText</key>
+            <string>Fixed when the package was built and can’t be changed: graphics mode, direct library version and build time.</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSTitleValueSpecifier</string>
+            <key>Title</key>
+            <string>Graphics Mode</string>
+            <key>Key</key>
+            <string>S2AGraphicsModeText</string>
+            <key>DefaultValue</key>
+            <string>unknown</string>
+            <key>Values</key>
+            <array>
+                <string>unknown</string>
+            </array>
+            <key>Titles</key>
+            <array>
+                <string>Unknown (shown after opening a game once)</string>
+            </array>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSTitleValueSpecifier</string>
+            <key>Title</key>
+            <string>Direct Library Version</string>
+            <key>Key</key>
+            <string>S2ADirectLibVersionText</string>
+            <key>DefaultValue</key>
+            <string>unknown</string>
+            <key>Values</key>
+            <array>
+                <string>unknown</string>
+            </array>
+            <key>Titles</key>
+            <array>
+                <string>Unknown (shown after opening a game once)</string>
+            </array>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSTitleValueSpecifier</string>
+            <key>Title</key>
+            <string>Build Time (UTC)</string>
+            <key>Key</key>
+            <string>S2APackTimeText</string>
+            <key>DefaultValue</key>
+            <string>unknown</string>
+            <key>Values</key>
+            <array>
+                <string>unknown</string>
+            </array>
+            <key>Titles</key>
+            <array>
+                <string>Unknown (shown after opening a game once)</string>
+            </array>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSTitleValueSpecifier</string>
+            <key>Title</key>
+            <string>Build ID</string>
+            <key>Key</key>
+            <string>S2ABuildIDText</string>
+            <key>DefaultValue</key>
+            <string>unknown</string>
+            <key>Values</key>
+            <array>
+                <string>unknown</string>
+            </array>
+            <key>Titles</key>
+            <array>
+                <string>Unknown (shown after opening a game once)</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
