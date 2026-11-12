@@ -90,6 +90,8 @@ public sealed partial class EnvironmentWindow
     private DateTime installRateAt; private long installRateBase; private double? installRate;
     private bool installSeen = true;
     private bool phonePackJob;   // 当前这一单是「生成手机资源包」而不是装机：状态句 / 顶栏胶囊换另一套文案（「已装到 iPhone」对拼资源包不成立）
+    private bool estimatingPack;   // 「检测压缩收益」（phonePackEstimate 作业）正在跑：只读抽样试压，几秒，防止连点
+    private string packEstimateNote = "";   // 按钮下面那行「正在抽样试压…」/ 上次检测的结果（空 = 不显示）
     private bool standaloneJob;  // 同上，「构建独立IPA」这一单
     private string? standalonePath;   // 最近一次构建好的独立 IPA（装机页「导出…」用）
     private string? standaloneFor;    // 它是哪一款的（不串到别的游戏上）
@@ -1006,9 +1008,14 @@ public sealed partial class EnvironmentWindow
                 standaloneFor == game.Id && standalonePath is { Length: > 0 } && File.Exists(standalonePath) && !installBusy);
             AutomationId(exportIpa, "progress.standalone_export");
             exportIpa.Margin = new Thickness(0, 0, 12, 0); followUp.Children.Add(exportIpa);
-            var packNow = Action("install.phone_pack", () => _ = RunPhonePackAsync(game), !installBusy && !packRunning);
+            var packNow = Action("install.phone_pack", () => _ = RunPhonePackAsync(game), !installBusy && !packRunning && !estimatingPack);
             AutomationId(packNow, "progress.phone_pack");
             packNow.Margin = new Thickness(0, 0, 12, 0); followUp.Children.Add(packNow);
+            // 「检测压缩收益」：与装机页同一个只读作业（phonePackEstimate），只报数字，不生成
+            var packGain = Action("install.phone_pack_estimate", () => _ = ShowCompressionEstimateAsync(game),
+                !installBusy && !packRunning && !estimatingPack);
+            AutomationId(packGain, "progress.phone_pack_estimate");
+            packGain.Margin = new Thickness(0, 0, 12, 0); followUp.Children.Add(packGain);
             var packFolder = Action("pack.output_folder", () => _ = PickPhonePackFolderAsync(), !installBusy && !packRunning);
             AutomationId(packFolder, "progress.phone_pack_folder");
             followUp.Children.Add(packFolder);
@@ -1231,13 +1238,19 @@ public sealed partial class EnvironmentWindow
         buttons.Children.Add(openFolder);
         // 「生成手机资源包」：把这款出好的 iPhone 资源包整理成「拷进手机就能玩」的形态（phonePack 作业）。
         //   库里 image/ios/pack 的 romfs.img 只存成 romfs.files/ 逐文件硬链接，整个拷进手机镜像核对不过，手机上一直是「安装中」。
-        var phonePack = new Button { Content = T("install.phone_pack"), IsEnabled = !installBusy && !packRunning,
+        var phonePack = new Button { Content = T("install.phone_pack"), IsEnabled = !installBusy && !packRunning && !estimatingPack,
             Padding = new Thickness(14, 8), CornerRadius = new CornerRadius(8),
             Background = Brush.Parse("#29292D"), Foreground = Ink, Margin = new Thickness(12, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center };
         AutomationId(phonePack, "install.phone_pack");
         phonePack.Click += (_, _) => _ = RunPhonePackAsync(game);
         buttons.Children.Add(phonePack);
+        // 「检测压缩收益」：只读抽样试压，只算出「现在多大、压完多大、能省多少」，不生成、不改资源包。
+        //   点上面那个「生成手机资源包」时，会先跑同一次检测，再把结果放进「是否压缩」的确认框（维护者 11-12：每次点都问）。
+        var packEstimate = Action("install.phone_pack_estimate", () => _ = ShowCompressionEstimateAsync(game),
+            !installBusy && !packRunning && !estimatingPack);
+        packEstimate.Margin = new Thickness(8, 0, 0, 0);
+        buttons.Children.Add(packEstimate);
         // 资源包的输出目录：选过一次就记住（私有目录 phone-pack-folder.txt），下次出还是它；不选就出到应用私有目录
         var packFolder = Action("pack.output_folder", () => _ = PickPhonePackFolderAsync(), !installBusy && !packRunning);
         AutomationId(packFolder, "install.phone_pack_folder");
@@ -1252,6 +1265,7 @@ public sealed partial class EnvironmentWindow
         list.Children.Add(buttons);
         list.Children.Add(Muted(string.Format(T("pack.output_folder_note"),
             PhonePackTarget() is { Length: > 0 } picked ? picked : T("pack.output_folder_default")), 12));
+        if (packEstimateNote.Length > 0) list.Children.Add(Muted(packEstimateNote, 12));   // 「正在抽样试压…」/ 上次的收益账
         if (revealProblem.Length > 0) list.Children.Add(Muted(revealProblem, 13));
         body.Children.Add(Card(list));
 
@@ -1513,23 +1527,33 @@ public sealed partial class EnvironmentWindow
     }
 
     /// <summary>「生成手机资源包」（phonePack 作业）：拼 romfs.img + 逐文件着色的资源包，产物 <输出目录>/&lt;游戏号&gt;/资源包；
-    /// 跑完把产物位置写在按钮下面（作业没给位置就照作业的原话）。玩家选过输出目录就带 location。</summary>
+    /// 跑完把产物位置写在按钮下面（作业没给位置就照作业的原话）。玩家选过输出目录就带 location。
+    /// 点之前先跑一次「检测压缩收益」，把数字放进「是否压缩」确认框（维护者 11-12：每次点都问）。</summary>
     private async Task RunPhonePackAsync(LibraryGame game)
     {
-        if (installBusy || packRunning) return;
+        if (installBusy || packRunning || estimatingPack) return;
+        estimatingPack = true; packEstimateNote = T("pack.estimate_running"); Render();   // 试压要几秒，先说一声
+        PackEstimate? estimate;
+        try { estimate = await ReadPackEstimateAsync(game); }   // 只读抽样试压；拿不到就 null（照不压缩走）
+        finally { estimatingPack = false; packEstimateNote = ""; Render(); }
+        // 每次点都问一次（维护者 11-12）；问完选「压缩 / 不压缩」才真正开跑，取消就什么都不做
+        if (await AskPackCompressAsync(estimate) is not { } compress) return;
         BeginPhoneJob(game, T("install.phone_pack_running"));
         phonePackJob = true;   // BeginPhoneJob 先清成装机，这里再标回这一单是拼资源包
         try
         {
             var target = PhonePackTarget();
-            var extra = target.Length > 0 ? new Dictionary<string, object?> { ["location"] = target } : null;
-            var job = await PackJobClient.RunAsync(PackRequest("phonePack", game.Id, extra), e => Dispatcher.UIThread.Post(() => IngestPhoneEvent(e)), CancellationToken.None);
+            var extra = new Dictionary<string, object?>();
+            if (target.Length > 0) extra["location"] = target;
+            if (compress) extra["compress"] = true;   // 只记录玩家的选择；产物仍是标准形态（压缩通道没接进产物层）
+            var job = await PackJobClient.RunAsync(PackRequest("phonePack", game.Id, extra.Count > 0 ? extra : null),
+                e => Dispatcher.UIThread.Post(() => IngestPhoneEvent(e)), CancellationToken.None);
             installState = job.Report.State;
             var output = job.Report.Succeeded && job.Report.Result.ValueKind == JsonValueKind.Object &&
                          job.Report.Result.TryGetProperty("outputPath", out var path) && path.ValueKind == JsonValueKind.String
                 ? path.GetString() ?? "" : "";
             installMessage = job.Report.Succeeded && output.Length > 0
-                ? string.Format(T("install.phone_pack_done"), output)
+                ? string.Format(T(compress ? "install.phone_pack_done_compress" : "install.phone_pack_done"), output)
                 : job.Report.Message;
             installDiagnostics = JobDiagnostics(job);
         }
@@ -1539,6 +1563,124 @@ public sealed partial class EnvironmentWindow
         { installState = "failed"; installMessage = T("install.phone_pack_failed"); installDiagnostics = error.Message; }
         finally { installBusy = false; Render(); }
     }
+
+    /// <summary>跑一次「检测压缩收益」作业（phonePackEstimate）：只读抽样试压，不改资源包。拿不到就 null。</summary>
+    private async Task<PackEstimate?> ReadPackEstimateAsync(LibraryGame game)
+    {
+        try
+        {
+            var job = await PackJobClient.RunAsync(PackRequest("phonePackEstimate", game.Id), null, CancellationToken.None);
+            return job.Report.Succeeded && job.Report.Result.ValueKind == JsonValueKind.Object
+                ? PackEstimate.Parse(job.Report.Result) : null;
+        }
+        catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or
+            ArgumentException or InvalidOperationException or OperationCanceledException or PlatformNotSupportedException or
+            System.ComponentModel.Win32Exception)
+        { return null; }
+    }
+
+    /// <summary>「检测压缩收益」按钮：跑估算，把按类型的明细弹出来（只读，不生成任何东西）。
+    /// 关掉弹窗后按钮下面留一行摘要，回来还能看见刚才测的账。</summary>
+    private async Task ShowCompressionEstimateAsync(LibraryGame game)
+    {
+        if (installBusy || packRunning || estimatingPack) return;
+        estimatingPack = true; packEstimateNote = T("pack.estimate_running"); Render();
+        try
+        {
+            var estimate = await ReadPackEstimateAsync(game);
+            packEstimateNote = EstimateSummary(estimate);
+            await ShowEstimateDetailAsync(estimate);
+        }
+        finally { estimatingPack = false; Render(); }
+    }
+
+    /// <summary>压缩收益明细：总体账 + 体积最大的几类。estimate 为 null 表示这次没测出来。</summary>
+    private async Task ShowEstimateDetailAsync(PackEstimate? estimate)
+    {
+        var dialog = NewPackDialog(T("pack.estimate_title"));
+        var body = new StackPanel { Spacing = 16, Margin = new Thickness(28) };
+        body.Children.Add(Label(T("pack.estimate_title"), 20));
+        if (estimate is null)
+        {
+            body.Children.Add(Muted(T("pack.estimate_failed"), 14));
+        }
+        else if (estimate.Verdict == "none")
+        {
+            body.Children.Add(Muted(T("pack.estimate_empty"), 14));
+        }
+        else
+        {
+            body.Children.Add(Muted(EstimateSummary(estimate), 14));
+            // 明细：只列体积前 6 类，其余折在「共 N 类」里（弹窗高度有限，玩家也关心不了那么多）
+            var top = estimate.Kinds.OrderByDescending(k => k.Bytes).Take(6).ToList();
+            var rows = new StackPanel { Spacing = 6 };
+            foreach (var kind in top)
+                rows.Children.Add(Muted(string.Format("{0}：{1} → {2}（{3:0}%）", kind.Ext, FormatBytes(kind.Bytes),
+                    FormatBytes(kind.Packed), kind.Ratio * 100), 13));
+            if (estimate.Kinds.Count > top.Count)
+                rows.Children.Add(Muted(string.Format(T("pack.estimate_more_kinds"), estimate.Kinds.Count - top.Count), 13));
+            body.Children.Add(rows);
+            body.Children.Add(Muted(string.Format(T("pack.estimate_note"), FormatBytes(estimate.SampledBytes)), 12));
+        }
+        var close = new Button { Content = T("action.close"), Padding = new Thickness(16, 9),
+            Background = Brush.Parse("#29292D"), Foreground = Ink, CornerRadius = new CornerRadius(8),
+            HorizontalAlignment = HorizontalAlignment.Right };
+        close.Click += (_, _) => dialog.Close();
+        body.Children.Add(close);
+        dialog.Content = body;
+        await dialog.ShowDialog(this);
+    }
+
+    /// <summary>「是否压缩」确认框：返回 null = 取消（什么都不做）、false = 不压缩生成、true = 压缩生成。
+    /// 选压缩 → 产物里放 romfs.img.gz（分块 gzip，pack/phone_pack/gzimage.py），手机上边读边解，占的空间少一半左右。</summary>
+    private async Task<bool?> AskPackCompressAsync(PackEstimate? estimate)
+    {
+        var dialog = NewPackDialog(T("pack.compress_title"));
+        bool? answer = null;
+        var body = new StackPanel { Spacing = 16, Margin = new Thickness(28) };
+        body.Children.Add(Label(T("pack.compress_title"), 20));
+        body.Children.Add(Muted(EstimateSummary(estimate), 14));
+        body.Children.Add(Muted(T("pack.compress_pending"), 12));
+        var buttons = new WrapPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+        var cancel = new Button { Content = T("action.cancel"), Padding = new Thickness(16, 9),
+            Background = Brush.Parse("#29292D"), Foreground = Ink, CornerRadius = new CornerRadius(8),
+            Margin = new Thickness(0, 0, 12, 0) };
+        cancel.Click += (_, _) => dialog.Close();
+        buttons.Children.Add(cancel);
+        var plain = new Button { Content = T("pack.compress_skip"), Padding = new Thickness(16, 9),
+            Background = Brush.Parse("#29292D"), Foreground = Ink, CornerRadius = new CornerRadius(8),
+            Margin = new Thickness(0, 0, 12, 0) };
+        AutomationId(plain, "pack.compress_skip");
+        plain.Click += (_, _) => { answer = false; dialog.Close(); };
+        buttons.Children.Add(plain);
+        var shrink = new Button { Content = T("pack.compress_confirm"), Padding = new Thickness(16, 9),
+            Background = Accent, Foreground = Canvas, CornerRadius = new CornerRadius(8) };
+        AutomationId(shrink, "pack.compress_confirm");
+        shrink.Click += (_, _) => { answer = true; dialog.Close(); };
+        buttons.Children.Add(shrink);
+        body.Children.Add(buttons);
+        dialog.Content = body;
+        await dialog.ShowDialog(this);
+        return answer;
+    }
+
+    /// <summary>压缩收益的一句话账（弹窗正文）：测不出来 / 没有文件时说清楚，别显示 0.00 GB。</summary>
+    private string EstimateSummary(PackEstimate? estimate)
+    {
+        if (estimate is null) return T("pack.estimate_failed");
+        if (estimate.Verdict == "none" || estimate.RawBytes <= 0) return T("pack.estimate_empty");
+        return string.Format(T(estimate.WorthIt ? "pack.estimate_worth" : "pack.estimate_thin"),
+            FormatBytes(estimate.RawBytes), FormatBytes(estimate.PackedBytes), FormatBytes(estimate.SavedBytes),
+            (1 - estimate.Ratio) * 100);
+    }
+
+    /// <summary>手机资源包相关弹窗的公共外壳（与 ConfirmInstallActionAsync 同一套外观）。</summary>
+    private Window NewPackDialog(string title) => new()
+    {
+        Title = title, Width = 460, SizeToContent = SizeToContent.Height, CanResize = false,
+        WindowStartupLocation = WindowStartupLocation.CenterOwner, Background = Canvas, Foreground = Ink,
+        FontFamily = new FontFamily("avares://S2Arm/Assets/Fonts#Manrope")
+    };
 
     /// <summary>「构建独立IPA」（standaloneIpa 作业）：只含这一款、独立包名 + 游戏名字图标的 App，出到这款的 image/ios/&lt;游戏号&gt;.ipa；
     /// 只出文件不装机（玩家自己用 Impactor / AltStore 装）；每个独立 App 占一个免费签名名额。</summary>

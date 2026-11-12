@@ -338,6 +338,19 @@ def jver(text):
     except (ValueError, AttributeError): return None
 
 
+def deliverable(pack, w):
+    """→ 真正要上传的那一行（相对路径、磁盘大小、记账 sha）。
+
+    玩家生成手机资源包时选了压缩的话，本地是 romfs.img.gz 而没有 romfs.img：路径换成 .gz、大小用磁盘上的，
+    sha 仍记索引里的逻辑值——手机端的账和缓存都按逻辑内容算，物理形态变了不该让它每次重推。
+    """
+    rel = w[0]
+    if IMG.fullmatch(rel) and not (Path(pack) / rel).exists():
+        gz = Path(pack) / (rel + ".gz")
+        if gz.exists(): return [rel + ".gz", str(gz.stat().st_size), w[2]]
+    return w
+
+
 def batches_of(pack, todo):
     """→ [[行…]…] 每批 ≤1 GB（按 index.tsv 顺序，单个超 1 GB 的文件自成一批）；行 = [路径, 大小, sha]"""
     out, cur, sz = [], [], 0
@@ -384,7 +397,8 @@ def plan(dev, pack, work, full=False, say=print):
         pushed = rows(read(dev, f"{rp(dev)}/.pushed", work, "r.pushed"), 2) if keep and not cut else {}   # 有残批 / 上次撞截短包：不信 .pushed
         if keep: say(f"机上有推完、还没解开的推送包 {len(keep)} 个：其中 {len(pushed)} 个文件算已推，不重推")
         if have: have = spot_check(dev, pack, work, have, say)
-        cut_img = [r for r in have if IMG.fullmatch(r)]   # 账上有镜像才去机上核：没有镜像的包不多一次设备往返
+        # 账上有镜像才去机上核：没有镜像的包不多一次设备往返；压缩产物（磁盘上是 .img.gz）走 tar，不涉及直写镜像
+        cut_img = [r for r in have if IMG.fullmatch(r) and not (Path(pack) / (r + ".gz")).exists()]
         if cut_img and not (read(dev, f"{rp(dev)}/.applied", work, "r.applied.pre") or "").strip():   # send 写镜像前把 .applied 清空：空 = 上次传镜像被打断，机上那份不完整，账不能信
             # 例外：.pushed 里记着这份镜像 = 上次已整份传完（put_big 成功后才记账），.applied 空只是后面解包没成（#457：原先照样打「被打断，这次重传」，
             #   实际按 .pushed 不重传、推送 0 个文件，日志自相矛盾，把排查带偏）。这时如实说镜像已传完、问题在解包
@@ -396,19 +410,22 @@ def plan(dev, pack, work, full=False, say=print):
     want = [w for w in (l.split("\t") for l in (pack / "index.tsv").read_text(encoding="utf-8").splitlines()) if len(w) == 3]
     acct = {**have, **pushed}
     todo = [w for w in want if acct.get(w[0]) != w[2]]
-    direct = [w for w in todo if IMG.fullmatch(w[0])]
+    ship = [deliverable(pack, w) for w in todo]   # 压缩镜像在这里换成 romfs.img.gz，走 tar 走，不直写
+    direct = [w for w in ship if IMG.fullmatch(w[0])]
     (work / "direct_img.tsv").write_text("".join("\t".join(w) + "\n" for w in direct), encoding="utf-8")
-    bs = batches_of(pack, [w for w in todo if not IMG.fullmatch(w[0])])
+    bs = batches_of(pack, [w for w in ship if not IMG.fullmatch(w[0])])
     for i, b in enumerate(bs):
         (work / f"push_{i:03d}.tsv").write_text("".join("\t".join(w) + "\n" for w in b), encoding="utf-8")
     (work / "pushed").write_text("".join(f"{r}\t{h}\n" for r, h in pushed.items()), encoding="utf-8")
-    return len(bs), len(todo), sum(int(w[1]) for w in todo)
+    return len(bs), len(ship), sum(int(w[1]) for w in ship)
 
 
 def spot_check(dev, pack, work, have, say):
     """推送前核机上实况（已应用索引是 App 写的账，不等于机上真有）→ 核过的账（可能删掉了对不上的行，或整个清空）"""
     want = {w[0]: w for w in (l.split("\t") for l in (Path(pack) / "index.tsv").read_text(encoding="utf-8").splitlines()) if len(w) == 3}
     same = [w for r, w in want.items() if have.get(r) == w[2]]
+    # 镜像不抽查：压缩产物的磁盘上是 romfs.img.gz，按索引里的名字拉不回（逻辑 sha 对得上就行）
+    same = [w for w in same if not IMG.fullmatch(w[0])]
     pick = [w for w in same if w[0].startswith("shaders/direct/") and ("/" not in w[0][15:] or re.fullmatch(r"shaders/direct/b-[^/]+/lib\.idx", w[0]))]
     pick += sorted((w for w in same if int(w[1]) < 4 << 20 and w not in pick), key=lambda w: w[2])[:5]
     chk = Path(work) / "chk"; chk.mkdir(exist_ok=True); bad = []

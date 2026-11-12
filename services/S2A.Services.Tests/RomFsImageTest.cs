@@ -5,6 +5,7 @@ using LibHac.Fs;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Text;
 using Path = System.IO.Path;
 
@@ -91,7 +92,15 @@ namespace S2A.Services.Tests
                 File.Delete(Path.Combine(program, RomFsIndex.ImageName));
                 Check("没有镜像（旧格式资源包）", "null", RomFsIndex.OpenImage(program) == null ? "null" : "已打开");
             }
-            finally { Directory.Delete(root, true); }
+            finally
+            {
+                try { Directory.Delete(root, true); }
+                catch (IOException error)   // 谁没关句柄就把现场打出来（别让清理把断言结果盖掉）
+                {
+                    Console.Error.WriteLine($"[romfs-image] 临时目录删不掉：{error.Message}；残留：" +
+                        string.Join(", ", Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)));
+                }
+            }
             return failures == 0 ? 0 : 1;
         }
     }

@@ -200,3 +200,32 @@ public sealed record InstallReadiness(IReadOnlyList<InstallItem> Items, bool Rea
         { throw new LibraryProtocolException("Invalid install checklist.", error); }
     }
 }
+
+/// <summary>One extension bucket of the compression estimate: what it costs now vs after packing.</summary>
+public sealed record PackEstimateKind(string Ext, long Files, long Bytes, long Sampled, double Ratio, long Packed);
+
+/// <summary>压缩收益估算（pack/jobs/phonepack.py estimate → make_phone_pack.estimate）：只读抽样试压的结果。
+/// WorthIt 是后端的判断（压缩后 &lt; 原来的 85%，即省 15% 以上）；Verdict 是 worth / thin / none。</summary>
+public sealed record PackEstimate(long RawBytes, long PackedBytes, long SavedBytes, double Ratio, long SampledBytes,
+    bool WorthIt, string Verdict, IReadOnlyList<PackEstimateKind> Kinds)
+{
+    public static PackEstimate Parse(JsonElement result)
+    {
+        try
+        {
+            LibraryJobResult.UniqueFields(result);
+            var kinds = new List<PackEstimateKind>();
+            if (result.TryGetProperty("byKind", out var list) && list.ValueKind == JsonValueKind.Array)
+                foreach (var k in list.EnumerateArray())
+                    kinds.Add(new(LibraryJobResult.Text(k, "ext", true), k.GetProperty("files").GetInt64(),
+                        k.GetProperty("bytes").GetInt64(), k.GetProperty("sampled").GetInt64(),
+                        k.GetProperty("ratio").GetDouble(), k.GetProperty("packed").GetInt64()));
+            return new(result.GetProperty("rawBytes").GetInt64(), result.GetProperty("packedBytes").GetInt64(),
+                result.GetProperty("savedBytes").GetInt64(), result.GetProperty("ratio").GetDouble(),
+                result.GetProperty("sampledBytes").GetInt64(), result.GetProperty("worthIt").GetBoolean(),
+                LibraryJobResult.Text(result, "verdict", true), kinds.AsReadOnly());
+        }
+        catch (Exception error) when (error is KeyNotFoundException or InvalidOperationException or FormatException)
+        { throw new LibraryProtocolException("Invalid compression estimate.", error); }
+    }
+}

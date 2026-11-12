@@ -1,0 +1,278 @@
+name: Build iOS shell
+
+# 用途：在 macOS runner 上跑 pack/shell_build.sh，产出「预编壳」（root/ + manifest.json）。
+#
+# 为什么只能在 macOS：壳要 Xcode（iOS SDK + Metal 编译器）、codesign、GNU Make ≥ 4、.NET 10 SDK；
+#   pack/shell_build.sh 第 17 行门禁、第 20/22 行 SDK 主版本校验都依赖这些工具。
+#
+# 产物用法（解压出 root/ 与 manifest.json 后，三选一）：
+#   ① 启动器资源目录 Shell/              → pack/jobs/ipa.py: bundled_shell() 读它
+#   ② <S2A_RUN_ROOT>/s2arm/cache/shell/<shellId>/  → pack/ipa.sh 按目录名找
+#   ③ 任意目录 + 环境变量 S2A_SHELL=<该目录>
+#
+# 前置条件（工作流本身不解决）：
+#   - 仓库已有远端并 push：壳编号按 HEAD 上输入表的对象哈希算，工作区必须干净（shell_build.sh:17）
+#   - pack/stage_inputs/shell.tsv 必须是 LF + Tab：CRLF 会让第 15 行的 awk 解析失败
+#   - runner 上的 iOS SDK 大版本要等于 tools/toolchain.env 的 IPHONEOS_SDK_MAJOR（当前 27）
+
+on:
+  workflow_dispatch:
+    inputs:
+      patch_sdk_major:
+        description: '本机 SDK 大版本与 toolchain.env 不一致时，改 env 并本地提交后继续（产物只适配同大版本 SDK 的机器）'
+        type: boolean
+        default: false
+  push:
+    branches: [master, main]
+    paths:
+      - 'pack/shell_build.sh'
+      - 'pack/shell/**'
+      - 'pack/stage_inputs/shell.tsv'
+      - 'pack/ship_ext.py'
+      - 'pack/app_bundle.py'
+      - 'pack/app.entitlements'
+      - 'runtime/**'
+      - 'services/**'
+      - 'graphics/metal/**'
+      - 'graphics/nvn/**'
+      - 'graphics/dsx/**'
+      - 'platform/**'
+      - 'ios/**'
+      - 'tools/**'
+      - 'Makefile'
+      - '.github/workflows/shell.yml'
+
+concurrency:
+  group: shell-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    runs-on: macos-latest
+    timeout-minutes: 180
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+
+    steps:
+      - name: 取源码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: 环境自检（打印，不判红）
+        run: |
+          set -uo pipefail
+          uname -a
+          sw_vers || true
+          df -h / | tail -1
+          echo "--- Xcode ---"
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo "（/Applications 下没有 Xcode）"
+          xcodebuild -version || true
+          xcode-select -p || true
+          echo "--- SDK ---"
+          xcrun --sdk iphoneos --show-sdk-version || true
+          xcrun -sdk iphoneos metal --version 2>&1 | head -3 || true
+          echo "--- 工具 ---"
+          bash --version | head -1
+          (command -v gmake && gmake --version | head -1) || echo "（没有 gmake）"
+          python3 --version || true
+          (dotnet --list-sdks) || echo "（PATH 里没有 dotnet）"
+
+      - name: 选 Xcode 并核 SDK 主版本
+        run: |
+          set -euo pipefail
+
+          # 选 /Applications 下版本号最大的 Xcode（与 tools/toolchain.sh 的缺省规则一致）
+          XCODE_APP=$(python3 - <<'PY'
+          import glob, re
+          def key(p):
+              nums = re.findall(r'\d+', p.rsplit('Xcode', 1)[-1])
+              return [int(n) for n in nums] or [0]
+          apps = sorted(glob.glob('/Applications/Xcode*.app'), key=key)
+          print(apps[-1] if apps else '')
+          PY
+          )
+          if [ -z "$XCODE_APP" ]; then
+            echo "::error::runner 上没有 /Applications/Xcode*.app，无法出壳"
+            exit 1
+          fi
+          echo "选中 $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          echo "S2A_XCODE=$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
+          echo "S2A_DEVELOPER_DIR=$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
+          echo "DEVELOPER_DIR=$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
+
+          SDKV=$(DEVELOPER_DIR="$XCODE_APP/Contents/Developer" xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || true)
+          [ -n "$SDKV" ] || { echo "::error::$XCODE_APP 没有 iOS SDK（Xcode → Settings → Components 装 iOS 平台）"; exit 1; }
+          MAJOR=${SDKV%%.*}
+
+          WANT=$(awk -F= '$1 == "IPHONEOS_SDK_MAJOR" { print $2 }' tools/toolchain.env)
+          echo "runner iOS SDK=$SDKV（主版本 $MAJOR），tools/toolchain.env 要求 $WANT"
+
+          if [ "$MAJOR" != "$WANT" ]; then
+            if [ "${PATCH_SDK_MAJOR:-false}" != "true" ]; then
+              echo "::error::SDK 主版本不符：runner=$MAJOR / toolchain.env=$WANT。三条出路：① 换一个带 iOS SDK $WANT 的 runner；② 按 workflow_dispatch 的 patch_sdk_major=true 重跑（会改 toolchain.env 并本地提交，产物只适配 $MAJOR 的机器）；③ 把 tools/toolchain.env 的 IPHONEOS_SDK_MAJOR 改成 $MAJOR 并提交（壳编号会变）"
+              exit 1
+            fi
+            echo "::warning::patch_sdk_major=true：把 IPHONEOS_SDK_MAJOR 改成 $MAJOR 并本地提交（只为让 shell_build.sh:17 的门禁通过）"
+            sed -i '' "s/^IPHONEOS_SDK_MAJOR=.*/IPHONEOS_SDK_MAJOR=$MAJOR/" tools/toolchain.env
+            git -c user.name='ci' -c user.email='ci@localhost' commit -am "ci: IPHONEOS_SDK_MAJOR=$MAJOR for runner Xcode" -q
+            echo "::warning::产出的壳绑定 iOS SDK $MAJOR；别的机器用之前要确认 SDK 主版本一致"
+          fi
+        env:
+          PATCH_SDK_MAJOR: ${{ inputs.patch_sdk_major && 'true' || 'false' }}
+
+      - name: 补装 Metal Toolchain（缺才装）
+        run: |
+          set -uo pipefail
+          if xcrun -sdk iphoneos metal --version >/dev/null 2>&1; then
+            echo "Metal 编译器已就绪"; xcrun -sdk iphoneos metal --version | head -1; exit 0
+          fi
+          echo "缺 Metal 编译器，尝试 xcodebuild -downloadComponent MetalToolchain"
+          sudo xcodebuild -downloadComponent MetalToolchain || true
+          if ! xcrun -sdk iphoneos metal --version >/dev/null 2>&1; then
+            echo "::error::runner 缺 Metal Toolchain 且自动下载失败（Xcode → Settings → Components 手动装）"
+            exit 1
+          fi
+          xcrun -sdk iphoneos metal --version | head -1
+
+      - name: 装 GNU Make ≥ 4 与较新的 bash
+        run: |
+          set -euo pipefail
+          brew install make bash
+          GM="$(command -v gmake || true)"
+          [ -n "$GM" ] || GM="$(brew --prefix)/bin/gmake"
+          "$GM" --version | head -1 | grep -qE 'GNU Make ([4-9]|[1-9][0-9])\.' \
+            || { echo "::error::gmake 版本不足 4"; exit 1; }
+          echo "S2A_GMAKE=$GM" >> "$GITHUB_ENV"
+          BASH5="$(brew --prefix)/bin/bash"
+          [ -x "$BASH5" ] && echo "BASH5=$BASH5" >> "$GITHUB_ENV" || true
+
+      - name: 装 .NET 10 SDK（官方，NativeAOT 要用）
+        run: |
+          set -euo pipefail
+          curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+          bash /tmp/dotnet-install.sh --channel 10.0 --install-dir "$HOME/.dotnet"
+          "$HOME/.dotnet/dotnet" --version
+          echo "DOTNET_ROOT=$HOME/.dotnet" >> "$GITHUB_ENV"
+          echo "$HOME/.dotnet" >> "$GITHUB_PATH"
+          # pack/services/nxaot.sh 缺省就找 $HOME/.dotnet/dotnet，这里显式给一份
+          echo "DOTNET=$HOME/.dotnet/dotnet" >> "$GITHUB_ENV"
+
+      - name: 腾空间（删 Android SDK 与没用到的 Xcode）
+        run: |
+          set -uo pipefail
+          sudo rm -rf "${ANDROID_HOME:-/Users/runner/Library/Android/sdk}" "${ANDROID_SDK_ROOT:-}" 2>/dev/null || true
+          KEEP=$(cd "${S2A_XCODE}/../.." && pwd -P)   # 选中的那个 Xcode 的真实路径
+          for app in /Applications/Xcode*.app; do
+            [ "$(cd "$app" && pwd -P)" = "$KEEP" ] && continue
+            sudo rm -rf "$app"
+          done
+          echo "保留 $KEEP"
+          df -h / | tail -1
+
+      - name: 预检（工作区干净 / 输入表可解析）
+        run: |
+          set -euo pipefail
+
+          # 1) 从 Windows 提交的仓库：确认脚本 / 输入表没被 autocrlf 改成 CRLF
+          BAD=$(LC_ALL=C grep -rl $'\r' --include='*.sh' --include='*.mk' --include='*.tsv' pack tools runtime graphics platform ios services Makefile 2>/dev/null | head -20 || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::下面这些文件含 CRLF，bash/make/awk 会直接报错（Windows 提交时 core.autocrlf=true 造成）"
+            echo "$BAD"
+            echo "修法：git config core.autocrlf false，把这些文件转回 LF 后重新提交"
+            exit 1
+          fi
+
+          # 2) shell.tsv 必须能按 "入<TAB>路径" 解析（shell_build.sh:15）
+          if LC_ALL=C grep -q $'\r' pack/stage_inputs/shell.tsv; then
+            echo "::error::pack/stage_inputs/shell.tsv 含 CRLF"
+            exit 1
+          fi
+          N=$(awk -F'\t' '$1 == "入" { n++ } END { print n + 0 }' pack/stage_inputs/shell.tsv)
+          [ "$N" -gt 0 ] || { echo "::error::shell.tsv 里解析不到「入」行（$N 条），门禁会直接报红"; exit 1; }
+          echo "输入表可解析：$N 条"
+
+          # 3) shell_build.sh:17 —— $IN 与 shell.tsv 不许有未提交改动
+          IN=$(awk -F'\t' '$1 == "入" { print $2 }' pack/stage_inputs/shell.tsv)
+          DIRTY=$(git status --porcelain -- $IN pack/stage_inputs/shell.tsv || true)
+          if [ -n "$DIRTY" ]; then
+            echo "::error::壳输入表范围内的文件有未提交改动（shell_build.sh:17 会拒）"
+            echo "$DIRTY"
+            echo "先把这些改动提交并 push，再重跑本工作流"
+            exit 1
+          fi
+          echo "工作区（输入表范围）干净"
+
+      - name: 出壳
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/shell"
+          rm -rf "$OUT"
+          export S2A_PY=python3
+          echo "工具链：Xcode=${S2A_XCODE}  SDK=$(DEVELOPER_DIR=$S2A_XCODE xcrun --sdk iphoneos --show-sdk-version)  gmake=${S2A_GMAKE}"
+          "${BASH5:-bash}" pack/shell_build.sh "$OUT"
+
+      - name: 核壳并取壳编号
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/shell"
+          [ -f "$OUT/manifest.json" ] || { echo "::error::没产出 manifest.json"; exit 1; }
+          [ -d "$OUT/root" ] || { echo "::error::没产出 root/"; exit 1; }
+
+          python3 -m pack.shell.manifest verify --root "$OUT/root" --manifest "$OUT/manifest.json"
+          SID=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['details']['shellId'])" "$OUT/manifest.json")
+          echo "shellId=$SID"
+          echo "SID=$SID" >> "$GITHUB_ENV"
+          du -sh "$OUT" "$OUT/root"
+
+      - name: 打包 artifact（tar.gz 保权限）
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/shell"
+          cd "$RUNNER_TEMP"
+          tar -czf "shell-$SID.tar.gz" -C "$OUT" root manifest.json
+          shasum -a 256 "shell-$SID.tar.gz" | tee "shell-$SID.tar.gz.sha256"
+          ls -lh "shell-$SID.tar.gz"
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shell-${{ env.SID }}
+          path: |
+            ${{ runner.temp }}/shell-*.tar.gz
+            ${{ runner.temp }}/shell-*.tar.gz.sha256
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: 写摘要
+        if: always()
+        run: |
+          {
+            echo "## 预编壳"
+            echo
+            if [ -n "${SID:-}" ]; then
+              echo "- shellId：\`$SID\`"
+              echo "- artifact：\`shell-$SID\`（tar.gz，内含 \`root/\` 与 \`manifest.json\`）"
+              echo "- Xcode：\`${S2A_XCODE}\`"
+              echo "- iOS SDK：$(DEVELOPER_DIR=$S2A_XCODE xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo '?')"
+              echo
+              echo "### 拿到壳之后（Windows 侧）"
+              echo
+              echo '1. 解压，得到 `root/` 与 `manifest.json`'
+              echo "2. 落到下面任一位置，目录名用 shellId："
+              echo '   - 启动器资源目录 `Shell/`'
+              echo "   - \`<S2A_RUN_ROOT>/s2arm/cache/shell/$SID/\`"
+              echo '   - 任意目录 + `set S2A_SHELL=<该目录>`'
+              echo "3. 若源码树里有 \`engine.json\`，把它的 \`shellId\` 改成 \`$SID\`（pack/shell/manifest.py current_id 读它）"
+            else
+              echo "本次没有产出壳，见上面的步骤日志。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

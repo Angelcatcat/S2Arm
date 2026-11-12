@@ -72,4 +72,8 @@ console.keys
 *.xci
 *.nsz
 *.xcz
+
+# 本地打包运行时（tzdata / rcodesign / SkiaSharp 等，约 266 MB）与引擎快照清单（生成物）
+/Binaries/
+/engine.json
 *.nca

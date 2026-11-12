@@ -123,7 +123,14 @@ static int prune(const char *root, unsigned *nd, uint64_t *db) {
     char ip[2100]; snprintf(ip, sizeof ip, "%s/index.tsv", root);
     FILE *f = fopen(ip, "r"); if (!f) return -7;
     size_t cap = 1024; g_keep = malloc(cap * sizeof *g_keep); g_nkeep = 0; char line[4600];
-    while (fgets(line, sizeof line, f)) { char *t = strchr(line, '\t'); if (!t) continue; *t = 0; if (g_nkeep == cap) g_keep = realloc(g_keep, (cap *= 2) * sizeof *g_keep); g_keep[g_nkeep++] = strdup(line); }
+    while (fgets(line, sizeof line, f)) {
+        char *t = strchr(line, '\t'); if (!t) continue; *t = 0;
+        if (g_nkeep + 2 > cap) g_keep = realloc(g_keep, sizeof *g_keep * (cap = cap * 2 + 2));
+        g_keep[g_nkeep++] = strdup(line);
+        // 压缩镜像（romfs.img → romfs.img.gz）不在 index.tsv 里，玩家选了压缩时别在「清旧文件」这一步把它删掉
+        char gz[4700]; snprintf(gz, sizeof gz, "%s.gz", line);
+        g_keep[g_nkeep++] = strdup(gz);
+    }
     fclose(f);
     qsort(g_keep, g_nkeep, sizeof *g_keep, keep_cmp);
     g_rootlen = strlen(root); g_nd = nd; g_db = db;
@@ -136,14 +143,36 @@ static int prune(const char *root, unsigned *nd, uint64_t *db) {
 // 核对机上实况（10-25 测试设备2 马车8：执行器推了 4 批、App 解开 0 个包，照样把新 index.tsv 记成 index.applied.tsv / .applied，
 //   之后两局执行器信这份「已应用」只推 3 个文件，机上没有直连库、退回通用）：index.tsv 每一行的文件都在、大小对得上，才算应用成功。
 //   返回缺 / 大小不符的个数，*ex 记第一个（报红现场）；逐个 stat，九款最大索引约 39 万行、本机约 1 秒
+// 分块 gzip 镜像（pack/phone_pack/gzimage.py）：资源包选了压缩时，机上放的是 romfs.img.gz、没有 romfs.img，
+//   磁盘大小和 index.tsv 记的（解压后的逻辑长度）对不上。这里改核容器头里的逻辑长度
+//   （小端：魔数 "S2AGZ01\0" 8 字节 + u64 逻辑长度 8 字节，其余字段这里不关心）
+static int gz_logical_ok(const char *p, long long want) {
+    FILE *f = fopen(p, "rb"); if (!f) return 0;
+    unsigned char h[16]; size_t got = fread(h, 1, sizeof h, f); fclose(f);
+    if (got != sizeof h || memcmp(h, "S2AGZ01", 7)) return 0;
+    unsigned long long n = 0;
+    for (int i = 15; i >= 8; i--) n = (n << 8) | h[i];
+    return n == (unsigned long long)want;
+}
+// 明文按磁盘大小核；磁盘上没有（或大小不符）再看同名的 .gz 压缩镜像
+static int present_ok(const char *p, long long want) {
+    struct stat st;
+    if (!stat(p, &st) && S_ISREG(st.st_mode) && st.st_size == want) return 1;
+    char gz[8400]; snprintf(gz, sizeof gz, "%s.gz", p);
+    return gz_logical_ok(gz, want);
+}
+
 static unsigned verify_present(const char *root, char *ex, size_t exn) {
     char ip[2100]; snprintf(ip, sizeof ip, "%s/index.tsv", root); FILE *f = fopen(ip, "r");
     if (!f) { snprintf(ex, exn, "index.tsv 打不开：%s", strerror(errno)); return 1; }   // 审计 P2-7：原先只记缺 1 个、例子为空
-    char line[4600], p[6800]; unsigned miss = 0; struct stat st; ex[0] = 0;
+    char line[4600], p[6800]; unsigned miss = 0; ex[0] = 0;
     while (fgets(line, sizeof line, f)) {
         char *t = strchr(line, '\t'); if (!t) continue; *t = 0; long long want = atoll(t + 1);
         snprintf(p, sizeof p, "%s/%s", root, line);
-        if (stat(p, &st) || !S_ISREG(st.st_mode) || st.st_size != want) { if (!miss++) snprintf(ex, exn, "%s（%s）", line, stat(p, &st) ? "不在" : "大小不符"); }
+        if (!present_ok(p, want)) {
+            if (!miss++) { struct stat st2; char gz[6900]; snprintf(gz, sizeof gz, "%s.gz", p);
+                snprintf(ex, exn, "%s（%s）", line, (!stat(p, &st2) || !stat(gz, &st2)) ? "大小不符" : "不在"); }
+        }
     }
     if (ferror(f)) { snprintf(ex, exn, "index.tsv 读失败：%s", strerror(errno)); miss++; }
     fclose(f); return miss;
@@ -243,8 +272,8 @@ int s2a_pack_check(const char *root, char *first, size_t n) {
     char line[4096]; int bad = 0; if (first && n) first[0] = 0;
     while (fgets(line, sizeof line, f)) {
         char *t1 = strchr(line, '\t'); if (!t1) continue; *t1 = 0; long long want = atoll(t1 + 1);
-        char p[4200]; struct stat st; snprintf(p, sizeof p, "%s/%s", root, line);
-        if (stat(p, &st) || st.st_size != want) { if (!bad++ && first && n) strlcpy(first, line, n); }
+        char p[4200]; snprintf(p, sizeof p, "%s/%s", root, line);
+        if (!present_ok(p, want)) { if (!bad++ && first && n) strlcpy(first, line, n); }   // 压缩镜像（.img.gz）按容器头里的逻辑长度核
     }
     if (ferror(f)) { if (first && n) snprintf(first, n, "index.tsv（读失败：%s）", strerror(errno)); bad++; }
     fclose(f); return bad;

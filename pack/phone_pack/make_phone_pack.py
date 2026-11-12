@@ -14,9 +14,15 @@ import json
 import os
 import shutil
 import sys
+import zlib
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent          # <Engine>/pack/phone_pack（打包成 exe 后是临时解包目录）
+HERE = Path(__file__).resolve().parent
+
+# 分块 gzip 镜像（romfs.img.gz）：与本文件同目录，出包/自测都用它
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+import gzimage          # <Engine>/pack/phone_pack（打包成 exe 后是临时解包目录）
 
 
 def engine_ok(base):
@@ -63,6 +69,93 @@ def load_engine(engine=None):
 def read_index(pack):
     with open(os.path.join(pack, "index.tsv"), encoding="utf-8") as f:
         return [l.rstrip("\n").split("\t") for l in f if l.strip()]
+
+
+SAMPLE_TOTAL = 64 << 20   # 估算时总共试压多少字节（64 MB：zlib 6 约 2 秒，玩家等得起）
+SAMPLE_PIECE = 3 << 20    # 单次从文件里读多少做样本（大文件不整读，否则一个大类就吃光预算）
+WORTH_RATIO = 0.85        # 压缩后 < 原来的 85%（省 15% 以上）就算值得压
+
+
+def _kinds(pack):
+    """按扩展名归堆：[ext] = [(路径, 字节)]；顺带算总字节。romfs.img 已按 #329 拆成 romfs.files/，这里遍历的是真实文件。"""
+    kinds, raw = {}, 0
+    for dirpath, _dirs, names in os.walk(pack):
+        for name in names:
+            p = os.path.join(dirpath, name)
+            try:
+                n = os.path.getsize(p)
+            except OSError:
+                continue
+            raw += n
+            k = kinds.setdefault(os.path.splitext(name)[1].lower() or "(无扩展名)", [])
+            k.append((p, n))
+    return kinds, raw
+
+
+def _probe(path, size, cap):
+    """只读 cap 字节去试压：小文件整读；大文件在文件里均匀取 8 段拼接（只读开头会把已压过的资源误判成可压）。"""
+    with open(path, "rb") as f:
+        if size <= cap:
+            return f.read()
+        n = 8
+        seg = max(cap // n, 1 << 14)
+        out = b""
+        for k in range(n):
+            f.seek(max(0, (size - seg) * k // n))
+            out += f.read(seg)
+        return out
+
+
+def estimate(pack, budget=None, tick=None):
+    """估算这套资源包打成压缩包能省多少：按扩展名分层抽样、现场试压（zlib level 6），不落盘、不改产物。
+
+    预算按类均分（类别少的包每类能多抽），层内按文件体积降序抽；没抽到的类按已测的整体压缩率折算。
+    返回：
+      {rawBytes, packedBytes, savedBytes, ratio, sampledBytes, byKind: [{ext, files, bytes, sampled, ratio, packed}],
+       worthIt, verdict}
+    verdict：worth（省得多，值得压）/ thin（省得少，别折腾）/ none（没有可压的东西）
+    tick：每压完一个样本调一次（作业拿它响应「停止」）。
+    """
+    budget = budget or SAMPLE_TOTAL
+    kinds, raw = _kinds(pack)
+    if not raw:
+        return dict(rawBytes=0, packedBytes=0, savedBytes=0, ratio=1.0, sampledBytes=0, byKind=[],
+                    worthIt=False, verdict="none")
+    per_kind = max(2 << 20, budget // max(len(kinds), 1))
+    rows, sampled = [], 0
+    for ext, items in sorted(kinds.items(), key=lambda kv: -sum(n for _, n in kv[1])):
+        picked = packed = 0
+        for p, n in sorted(items, key=lambda x: -x[1]):
+            cap = min(per_kind - picked, budget - sampled, SAMPLE_PIECE)
+            if cap <= 0:
+                break
+            try:
+                b = _probe(p, n, cap)   # 抽样只读，不动文件
+            except OSError:
+                continue
+            if not b:
+                continue
+            picked += len(b)
+            sampled += len(b)
+            packed += len(zlib.compress(b, 6))
+            if tick:
+                tick()
+        rows.append(dict(ext=ext, files=len(items), bytes=sum(n for _, n in items),
+                         sampled=picked, ratio=(packed / picked) if picked else None))
+    measured = [r for r in rows if r["ratio"] is not None]
+    fallback = (sum(r["sampled"] * r["ratio"] for r in measured) / sum(r["sampled"] for r in measured)
+                if measured else 1.0)
+    for r in rows:   # 没抽到的类按已测整体比率折算
+        if r["ratio"] is None:
+            r["ratio"] = fallback
+        r["packed"] = int(r["bytes"] * r["ratio"])
+    packed_total = min(sum(r["packed"] for r in rows), raw)   # 压不动时别报「压缩后比原来还大」
+    ratio = packed_total / raw
+    saved = raw - packed_total
+    worth = ratio < WORTH_RATIO
+    return dict(rawBytes=raw, packedBytes=packed_total, savedBytes=saved, ratio=ratio, sampledBytes=sampled,
+                byKind=sorted(rows, key=lambda r: -r["bytes"]), worthIt=worth,
+                verdict="worth" if worth else "thin")
 
 
 def place(src, dst):
@@ -112,8 +205,12 @@ def scan_games(games_dir):
     return out
 
 
-def build_one(romfs_mod, item, out_root, emit=lambda frac, text: None):
-    """生成一款；emit(0~1, 文字) 报进度。返回落盘字节数。"""
+def build_one(romfs_mod, item, out_root, emit=lambda frac, text: None, compress=False):
+    """生成一款；emit(0~1, 文字) 报进度。返回落盘字节数。
+
+    compress=True：romfs.img 写成 romfs.img.gz（分块 gzip，见 gzimage.py），其余文件照旧。
+    index.tsv / manifest.json 原样带过去——里面记的还是解压后的逻辑长度与 sha256，手机端按逻辑长度核。
+    """
     pack, gid = item["pack"], item["gid"]
     dst = os.path.join(out_root, gid, "资源包")
     shutil.rmtree(os.path.join(out_root, gid), ignore_errors=True)
@@ -137,7 +234,15 @@ def build_one(romfs_mod, item, out_root, emit=lambda frac, text: None):
                     raise BuildError("index.tsv 列了 %s，但包里既没有它也没有 %s/" % (rel, rel[:-4]))
                 made[rel] = romfs_mod.materialize(pack, rel, n, sha, say=lambda *_: None, progress=prog)
                 src = made[rel]
-            place(src, os.path.join(dst, rel))
+            if compress and name in IMAGES:
+                # 压缩镜像：直接写进产物（不落明文），进度按块折算到这一项的总字节
+                def cprog(done_blocks, total_blocks, _base=acc, _rel=rel, _n=n):
+                    emit(min(0.999, (_base + _n * done_blocks / max(total_blocks, 1)) / total),
+                         "压缩 %s  第 %d / %d 块" % (_rel, done_blocks, total_blocks))
+
+                gzimage.pack_image(src, gzimage.blob_name(os.path.join(dst, rel)), tick=cprog)
+            else:
+                place(src, os.path.join(dst, rel))
             acc += n
             emit(min(0.999, acc / total), "写入文件 %d / %d" % (k, len(rs)))
         for f in ("index.tsv", "manifest.json"):

@@ -181,28 +181,49 @@ namespace S2A.Services
             new IndexedStorage(Path.GetFullPath(romfsDir), File.ReadAllBytes(indexPath), indexPath, OverlayFiles(overlayDir), null, null);
 
         // 单文件镜像（pack/romfs_image.py）：romfs.img + romfs.imgmap + 索引齐全且镜像长度对得上才用；没有或长度不符（推到一半）→ null，调用方退回目录布局或报红
+        // 明文 romfs.img 优先；只有分块 gzip 的 romfs.img.gz（pack/phone_pack/gzimage.py，手机资源包选了压缩时）也照用——
+        //   对照表记的仍是解压后的逻辑长度，两种形态读出来的字节完全一样
         public static IStorage OpenImage(string programDir)
         {
             string image = Path.Combine(programDir, ImageName), map = Path.Combine(programDir, ImageMapName), index = Path.Combine(programDir, FileName);
-            if (!File.Exists(image) || !File.Exists(map) || !File.Exists(index)) return null;
+            if (!File.Exists(map) || !File.Exists(index)) return null;
             byte[] raw = File.ReadAllBytes(map);
             if (raw.Length < 20 || !raw.AsSpan(0, 8).SequenceEqual(ImageMagic)) throw new InvalidDataException($"RomFS 镜像对照表格式不对：{map}");
             long length = BitConverter.ToInt64(raw, 8);
             int count = BitConverter.ToInt32(raw, 16);
             if (raw.Length != 20 + count * 8L) throw new InvalidDataException($"RomFS 镜像对照表长度不对：{map}");
-            var handle = File.OpenHandle(image, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.RandomAccess);
-            if (RandomAccess.GetLength(handle) != length)
+            IRomFsImage source;
+            if (File.Exists(image))
             {
-                handle.Dispose();
-                return null;
+                var handle = File.OpenHandle(image, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.RandomAccess);
+                if (RandomAccess.GetLength(handle) != length)
+                {
+                    handle.Dispose();
+                    return null;
+                }
+                source = new PlainRomFsImage(handle, Path.GetFileName(image));
+            }
+            else
+            {
+                source = RomFsImageGz.Open(image + RomFsImageGz.Suffix);
+                if (source is null) return null;
+                if (source.Length != length)   // 压缩镜像的逻辑长度要与对照表一致，否则同明文被截短一样当推到一半
+                {
+                    source.Dispose();
+                    return null;
+                }
             }
             long[] offsets = new long[count];
             Buffer.BlockCopy(raw, 20, offsets, 0, count * 8);
             // 覆盖层两处（前一处优先）：romfs_overlay/ 是出包侧的界面修复，romfs/ 是玩家放进去的资源 mod——
             //   镜像里有这个相对路径时优先读同名文件夹里的真实文件，镜像里没有的照样从 romfs.img 读
             return new IndexedStorage(Path.GetFullPath(Path.Combine(programDir, "romfs")), File.ReadAllBytes(index), index,
-                OverlayFiles(Path.Combine(programDir, ImageOverlayDir), Path.Combine(programDir, "romfs")), handle, offsets);
+                OverlayFiles(Path.Combine(programDir, ImageOverlayDir), Path.Combine(programDir, "romfs")), source, offsets);
         }
+
+        /// <summary>这款有没有单文件镜像（明文或分块 gzip）。给 Decide 判断「镜像文件在却用不了」。</summary>
+        public static bool ImageExists(string programDir) =>
+            File.Exists(Path.Combine(programDir, ImageName)) || File.Exists(Path.Combine(programDir, ImageName + RomFsImageGz.Suffix));
 
         public enum Source { Image, Directory, Missing }
 
@@ -267,10 +288,10 @@ namespace S2A.Services
             private readonly long[] _fileLen;
 
             private readonly Dictionary<string, string> _overlay;   // RomFS 相对路径 → 覆盖层文件（OverlayFiles），null = 无覆盖层
-            private readonly Microsoft.Win32.SafeHandles.SafeFileHandle _image;   // 单文件镜像；null = 目录布局
+            private readonly IRomFsImage _image;   // 单文件镜像（明文 romfs.img / 分块 gzip 的 romfs.img.gz）；null = 目录布局
             private readonly long[] _imageOffset;   // 文件号 → 镜像偏移，-1 = 在覆盖层
 
-            public IndexedStorage(string root, byte[] idx, string where, Dictionary<string, string> overlay, Microsoft.Win32.SafeHandles.SafeFileHandle image, long[] imageOffset)
+            public IndexedStorage(string root, byte[] idx, string where, Dictionary<string, string> overlay, IRomFsImage image, long[] imageOffset)
             {
                 _root = root;
                 _overlay = overlay;
@@ -391,12 +412,22 @@ namespace S2A.Services
                         long at = _imageOffset[_ref[i]] + inner;
                         Span<byte> left = destination[..count];
 
-                        while (!left.IsEmpty)
+                        try
                         {
-                            int got = RandomAccess.Read(_image, left, at);
-                            if (got <= 0) return ResultFs.HostFileDataCorrupted.Value;
-                            left = left[got..];
-                            at += got;
+                            while (!left.IsEmpty)
+                            {
+                                int got = _image.Read(left, at);
+                                if (got <= 0) return ResultFs.HostFileDataCorrupted.Value;
+                                left = left[got..];
+                                at += got;
+                            }
+                        }
+                        catch (IOException e) when (e.HResult == LazyHostFile.EFault)
+                        {
+                            // 目标是游戏内存、读盘期间页被写保护：内核往里写直接 EFAULT（#602：iPad 读 romfs.img「Bad address」→ 游戏 Break 退出）。
+                            //   同目录布局（LazyHostFile）那条：剩下的部分先读进宿主中转缓冲、报一次写再拷
+                            if (!_image.ReadBounce(left, at, out int got) || got != left.Length)
+                                return ResultFs.HostFileDataCorrupted.Value;
                         }
                     }
                     else if (_ref[i] >= 0)
