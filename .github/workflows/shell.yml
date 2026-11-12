@@ -199,6 +199,30 @@ jobs:
           fi
           echo "工作区（输入表范围）干净"
 
+      - name: 预编 C# 静态库（NativeAOT，单独跑，失败原因看得见）
+        run: |
+          set +e
+          set -uo pipefail
+          O="$RUNNER_TEMP/nxaot.out"; E="$RUNNER_TEMP/nxaot.err"
+          bash services/nxaot.sh ios-arm64 > "$O" 2> "$E"
+          RC=$?
+          echo "----- stderr -----"; tail -8 "$E"
+          echo "----- stdout -----"; tail -2 "$O"
+          if [ $RC -ne 0 ]; then
+            tail -6 "$E" | cut -c1-300 | while IFS= read -r l; do
+              [ -n "$l" ] || continue
+              echo "::error::nxaot: ${l}"
+            done
+            for p in "$HOME"/.s2arm/run/s2arm/cache/nxaot/*/*.tmp/publish.log; do
+              [ -f "$p" ] || continue
+              grep -a -iE 'error|not found|could not' "$p" | head -4 | cut -c1-300 | while IFS= read -r l; do
+                echo "::error::publish: ${l}"
+              done
+            done
+            exit 1
+          fi
+          exit 0
+
       - name: 出壳
         run: |
           set +e
