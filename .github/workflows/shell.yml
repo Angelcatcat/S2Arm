@@ -103,17 +103,13 @@ jobs:
           WANT=$(awk -F= '$1 == "IPHONEOS_SDK_MAJOR" { print $2 }' tools/toolchain.env)
           echo "runner iOS SDK=$SDKV（主版本 $MAJOR），tools/toolchain.env 里是 $WANT"
 
-          # 壳编号记的是「实际链接用的 SDK 主版本」，所以以 runner 为准对齐：
-          # 不一致就改 toolchain.env 并本地提交（只为过 shell_build.sh:17 的门禁，提交不出这个 runner）。
-          # 产出的壳 iosSdk=$MAJOR —— 出包机的 tools/toolchain.env 也必须同步成 $MAJOR，否则装配时壳编号对不上。
+          # 壳编号记的是「实际链接用的 SDK 主版本」。不一致就在这里报红，不做静默改写：
+          # 改 toolchain.env 会换壳编号，必须由人决定并提交（出包机的 env 也得同步）。
           if [ "$MAJOR" != "$WANT" ]; then
-            echo "::warning::SDK 主版本不一致（runner=$MAJOR / env=$WANT）：按 runner 对齐，壳的 iosSdk 将是 $MAJOR"
-            sed -i '' "s/^IPHONEOS_SDK_MAJOR=.*/IPHONEOS_SDK_MAJOR=$MAJOR/" tools/toolchain.env
-            git -c user.name='ci' -c user.email='ci@localhost' commit -am "ci: IPHONEOS_SDK_MAJOR=$MAJOR (runner iOS SDK $SDKV)" -q \
-              || echo "::error::对齐 toolchain.env 后提交失败（下一步预检会拦）"
-            [ "$(awk -F= '$1 == "IPHONEOS_SDK_MAJOR" { print $2 }' tools/toolchain.env)" = "$MAJOR" ] \
-              || { echo "::error::toolchain.env 没对齐到 $MAJOR（仍是 $WANT）"; exit 1; }
+            echo "::error::SDK 主版本不符：runner=$MAJOR / tools/toolchain.env=$WANT。把 tools/toolchain.env 的 IPHONEOS_SDK_MAJOR 改成 $MAJOR 并提交后重跑（壳编号会变，出包机同步）"
+            exit 1
           fi
+          exit 0
 
       - name: 补装 Metal Toolchain（缺才装）
         run: |
