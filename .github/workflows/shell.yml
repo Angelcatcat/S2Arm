@@ -46,7 +46,9 @@ permissions:
 
 jobs:
   shell:
-    runs-on: macos-latest
+    # 仓库源码用了 iOS 27 SDK 的 UISceneAccessoryRegistration 等 API（ios/extdisplay.m），
+    # 必须选 Xcode 27 镜像：GitHub 预览标签 xcode-27（默认 Xcode 27.0 beta / iOS SDK 27）
+    runs-on: xcode-27
     timeout-minutes: 180
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
