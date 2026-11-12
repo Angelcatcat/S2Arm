@@ -223,6 +223,27 @@ jobs:
           fi
           exit 0
 
+      - name: 失败时导出 C#/dotnet 日志
+        if: failure()
+        run: |
+          set +e
+          set -uo pipefail
+          shopt -s nullglob
+          FOUND=0
+          for f in "$HOME"/.s2arm/run/s2arm/cache/nxaot/*/*.tmp/publish.log \
+                   "$HOME"/.s2arm/run/s2arm/cache/nxaot/*/*/publish.log; do
+            FOUND=1
+            echo "===== $f"
+            grep -a -iE 'error|not found|失败|MSB[0-9]+|NU[0-9]+|could not' "$f" | head -5 | cut -c1-260 | while IFS= read -r line; do
+              echo "::error::nxaot: ${line}"
+            done
+          done
+          [ "$FOUND" = 1 ] || echo "::warning::缓存目录里没有 publish.log"
+          echo "===== 缓存目录"
+          ls -1 "$HOME"/.s2arm/run/s2arm/cache/nxaot 2>/dev/null | head -10
+          echo "===== nuget 源"
+          "${DOTNET:-dotnet}" nuget list source 2>&1 | head -8
+
       - name: 核壳并取壳编号
         run: |
           set -euo pipefail
