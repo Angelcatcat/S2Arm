@@ -82,34 +82,50 @@ jobs:
 
       - name: 选 Xcode 并核 SDK 主版本
         run: |
-          set -euo pipefail
+          set -uo pipefail   # 不用 -e：这里任何一步失败都要留下可读的 ::error:: / ::warning::，不许静默退出
 
-          # 选 /Applications 下版本号最大的 Xcode（与 tools/toolchain.sh 的缺省规则一致）
-          XCODE_APP=$(python3 - <<'PY'
+          # 从新到旧逐个试，第一个「有 iOS SDK」的 Xcode 就用它；xcode-select 切不过去也只用 DEVELOPER_DIR（xcrun/make 都认）
+          CANDIDATES=$(python3 - <<'PY'
           import glob, re
           def key(p):
               nums = re.findall(r'\d+', p.rsplit('Xcode', 1)[-1])
               return [int(n) for n in nums] or [0]
-          apps = sorted(glob.glob('/Applications/Xcode*.app'), key=key)
-          print(apps[-1] if apps else '')
+          for p in sorted(glob.glob('/Applications/Xcode*.app'), key=key, reverse=True):
+              print(p)
           PY
           )
-          if [ -z "$XCODE_APP" ]; then
-            echo "::error::runner 上没有 /Applications/Xcode*.app，无法出壳"
+          if [ -z "$CANDIDATES" ]; then
+            echo "::error::runner 上没有 /Applications/Xcode*.app"
             exit 1
           fi
-          echo "选中 $XCODE_APP"
-          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
-          echo "S2A_XCODE=$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
-          echo "S2A_DEVELOPER_DIR=$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
-          echo "DEVELOPER_DIR=$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
+          echo "候选 Xcode："; echo "$CANDIDATES"
 
-          SDKV=$(DEVELOPER_DIR="$XCODE_APP/Contents/Developer" xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || true)
-          [ -n "$SDKV" ] || { echo "::error::$XCODE_APP 没有 iOS SDK（Xcode → Settings → Components 装 iOS 平台）"; exit 1; }
+          XCODE_APP=""; SDKV=""
+          while IFS= read -r app; do
+            [ -n "$app" ] || continue
+            dd="$app/Contents/Developer"
+            [ -d "$dd" ] || { echo "跳过 $app：没有 Contents/Developer"; continue; }
+            v=$(DEVELOPER_DIR="$dd" xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || true)
+            if [ -z "$v" ]; then echo "跳过 $app：没有 iOS SDK"; continue; fi
+            XCODE_APP="$app"; SDKV="$v"; break
+          done <<< "$CANDIDATES"
+
+          if [ -z "$XCODE_APP" ]; then
+            echo "::error::所有 Xcode 都没有 iOS SDK（需要在 Xcode → Settings → Components 装 iOS 平台）"
+            exit 1
+          fi
+          DD="$XCODE_APP/Contents/Developer"
+          echo "选中 $XCODE_APP（iOS SDK $SDKV）"
+          sudo xcode-select -s "$DD" || echo "::warning::xcode-select 切换失败，仅用 DEVELOPER_DIR=$DD"
+          {
+            echo "S2A_XCODE=$DD"
+            echo "S2A_DEVELOPER_DIR=$DD"
+            echo "DEVELOPER_DIR=$DD"
+            echo "SDK_ACTUAL=$SDKV"
+          } >> "$GITHUB_ENV"
           MAJOR=${SDKV%%.*}
 
           WANT=$(awk -F= '$1 == "IPHONEOS_SDK_MAJOR" { print $2 }' tools/toolchain.env)
-          echo "SDK_ACTUAL=$SDKV" >> "$GITHUB_ENV"
           echo "runner iOS SDK=$SDKV（主版本 $MAJOR），tools/toolchain.env 里是 $WANT"
 
           # 壳编号记的是「实际链接用的 SDK 主版本」，所以以 runner 为准对齐：
@@ -118,7 +134,10 @@ jobs:
           if [ "$MAJOR" != "$WANT" ]; then
             echo "::warning::SDK 主版本不一致（runner=$MAJOR / env=$WANT）：按 runner 对齐，壳的 iosSdk 将是 $MAJOR"
             sed -i '' "s/^IPHONEOS_SDK_MAJOR=.*/IPHONEOS_SDK_MAJOR=$MAJOR/" tools/toolchain.env
-            git -c user.name='ci' -c user.email='ci@localhost' commit -am "ci: IPHONEOS_SDK_MAJOR=$MAJOR (runner iOS SDK $SDKV)" -q
+            git -c user.name='ci' -c user.email='ci@localhost' commit -am "ci: IPHONEOS_SDK_MAJOR=$MAJOR (runner iOS SDK $SDKV)" -q \
+              || echo "::error::对齐 toolchain.env 后提交失败（下一步预检会拦）"
+            [ "$(awk -F= '$1 == "IPHONEOS_SDK_MAJOR" { print $2 }' tools/toolchain.env)" = "$MAJOR" ] \
+              || { echo "::error::toolchain.env 没对齐到 $MAJOR（仍是 $WANT）"; exit 1; }
           fi
 
       - name: 补装 Metal Toolchain（缺才装）
@@ -251,6 +270,16 @@ jobs:
             echo "== git =="; git rev-parse HEAD 2>/dev/null; git status --porcelain 2>/dev/null | head -20
           } > "$E" 2>&1 || true
           cat "$E"
+
+          # 关键信息同时打成 ::warning::（注解在 run 页匿名可见，失败时不用登录也能定位）
+          NX=$(ls -d /Applications/Xcode*.app 2>/dev/null | wc -l | tr -d ' ')
+          METAL=$(xcrun -sdk iphoneos metal --version >/dev/null 2>&1 && echo ok || echo no)
+          GM=$(command -v gmake >/dev/null 2>&1 && gmake --version | head -1 || echo none)
+          DN=$("${DOTNET:-dotnet}" --list-sdks 2>/dev/null | wc -l | tr -d ' ')
+          echo "::warning::ENV xcodes=$NX sdk=${SDK_ACTUAL:-none} metal=$METAL dotnetsdks=$DN"
+          echo "::warning::XCODE ${S2A_XCODE:-none}"
+          echo "::warning::GMAKE ${GM}"
+          echo "::warning::HEAD $(git rev-parse --short HEAD 2>/dev/null) dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
 
       - name: 上传 artifact
         if: always()
