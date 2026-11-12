@@ -111,7 +111,7 @@ jobs:
           # 壳编号记的是「实际链接用的 SDK 主版本」。不一致就在这里报红，不做静默改写：
           # 改 toolchain.env 会换壳编号，必须由人决定并提交（出包机的 env 也得同步）。
           if [ "$MAJOR" != "$WANT" ]; then
-            echo "::error::SDK 主版本不符：runner=$MAJOR / tools/toolchain.env=$WANT。把 tools/toolchain.env 的 IPHONEOS_SDK_MAJOR 改成 $MAJOR 并提交后重跑（壳编号会变，出包机同步）"
+            echo "::error::SDK 主版本不符：runner=${MAJOR} / tools/toolchain.env=${WANT}。把 tools/toolchain.env 的 IPHONEOS_SDK_MAJOR 改成 ${MAJOR} 并提交后重跑（壳编号会变，出包机同步）"
             exit 1
           fi
           echo "::warning::S4c end"
@@ -212,14 +212,13 @@ jobs:
           RC=$?
           tail -40 "$LOG"
           if [ $RC -ne 0 ]; then
-            # 【红】行转成 ::error:: 注解（run 页匿名可见），最多 4 条
-            n=0
-            while IFS= read -r line; do
-              [ -n "$line" ] || continue
-              echo "::error::shell_build: $line"
-              n=$((n+1)); [ $n -ge 4 ] && break
-            done < <(grep -a '【红】' "$LOG" | tail -4)
-            [ "$n" -eq 0 ] && echo "::error::shell_build 退出码 ${RC}：$(tail -3 "$LOG" 2>/dev/null | tr '\n' ' ')"
+            # 【红】行 + 真正的编译错误都转成 ::error:: 注解（run 页匿名可见）
+            grep -a '【红】' "$LOG" | tail -3 | cut -c1-280 | while IFS= read -r line; do
+              echo "::error::shell_build: ${line}"
+            done
+            grep -a -iE 'error:|\*\*\* |No such file|cannot find|not found' "$LOG" | tail -6 | cut -c1-280 | while IFS= read -r line; do
+              echo "::error::tail: ${line}"
+            done
             exit 1
           fi
           exit 0
