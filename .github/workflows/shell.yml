@@ -86,14 +86,14 @@ jobs:
           set -uo pipefail
           LOG="$RUNNER_TEMP/tc.log"
           TRACE="$RUNNER_TEMP/trace.log"
-          exec 9> "$TRACE"
-          export BASH_XTRACEFD=9
+          exec 2> "$TRACE"   # 本步 stderr 全进 trace.log（macOS bash 3.2 不认 BASH_XTRACEFD）
           set -x
 
           # 用项目自己的解析器（tools/toolchain.sh：装着的 Xcode 里最新的一个，并核 iOS SDK + Metal 编译器）
           source tools/toolchain.sh > "$LOG" 2>&1
           RC=$?
           cat "$LOG"
+          echo "::warning::S4a rc=$RC sdk=${S2A_TC_SDK:-none} dd=${DEVELOPER_DIR:-none}"
           if [ $RC -ne 0 ] || [ -z "${S2A_TC_SDK:-}" ] || [ -z "${DEVELOPER_DIR:-}" ]; then
             echo "::error::工具链解析失败（rc=$RC）：$(tail -3 "$LOG" 2>/dev/null | tr '\n' ' ')"
             exit 1
@@ -105,6 +105,7 @@ jobs:
           MAJOR=${SDKV%%.*}
 
           WANT=$(awk -F= '$1 == "IPHONEOS_SDK_MAJOR" { print $2 }' tools/toolchain.env)
+          echo "::warning::S4b sdkv=$SDKV major=$MAJOR want=$WANT"
           echo "runner iOS SDK=$SDKV（主版本 $MAJOR），tools/toolchain.env 里是 $WANT"
 
           # 壳编号记的是「实际链接用的 SDK 主版本」。不一致就在这里报红，不做静默改写：
@@ -113,6 +114,7 @@ jobs:
             echo "::error::SDK 主版本不符：runner=$MAJOR / tools/toolchain.env=$WANT。把 tools/toolchain.env 的 IPHONEOS_SDK_MAJOR 改成 $MAJOR 并提交后重跑（壳编号会变，出包机同步）"
             exit 1
           fi
+          echo "::warning::S4c end"
           exit 0
 
       - name: 补装 Metal Toolchain（缺才装）
