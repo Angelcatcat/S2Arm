@@ -85,6 +85,10 @@ jobs:
           set +e   # runner 默认 bash -e：这里必须关掉，任何一步失败都要留下可读的 ::error::
           set -uo pipefail
           LOG="$RUNNER_TEMP/tc.log"
+          TRACE="$RUNNER_TEMP/trace.log"
+          exec 9> "$TRACE"
+          export BASH_XTRACEFD=9
+          set -x
 
           # 用项目自己的解析器（tools/toolchain.sh：装着的 Xcode 里最新的一个，并核 iOS SDK + Metal 编译器）
           source tools/toolchain.sh > "$LOG" 2>&1
@@ -261,12 +265,15 @@ jobs:
           # 关键信息同时打成 ::warning::（注解在 run 页匿名可见，失败时不用登录也能定位）
           NX=$(ls -d /Applications/Xcode*.app 2>/dev/null | wc -l | tr -d ' ')
           METAL=$(xcrun -sdk iphoneos metal --version >/dev/null 2>&1 && echo ok || echo no)
-          GM=$(command -v gmake >/dev/null 2>&1 && gmake --version | head -1 || echo none)
           DN=$("${DOTNET:-dotnet}" --list-sdks 2>/dev/null | wc -l | tr -d ' ')
-          echo "::warning::ENV xcodes=$NX sdk=${SDK_ACTUAL:-none} metal=$METAL dotnetsdks=$DN"
-          echo "::warning::XCODE ${S2A_XCODE:-none}"
-          echo "::warning::GMAKE ${GM}"
-          echo "::warning::HEAD $(git rev-parse --short HEAD 2>/dev/null) dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+          echo "::warning::ENV xcodes=$NX sdk=${SDK_ACTUAL:-none} metal=$METAL dotnetsdks=$DN xcode=${S2A_XCODE:-none}"
+          awk -F= '$1=="IPHONEOS_SDK_MAJOR"{print "::warning::WANT raw=[" $2 "]"}' tools/toolchain.env 2>/dev/null | cat -v
+          if [ -f "$RUNNER_TEMP/tc.log" ]; then
+            tail -2 "$RUNNER_TEMP/tc.log" | while IFS= read -r l; do echo "::warning::TC $l"; done
+          fi
+          if [ -f "$RUNNER_TEMP/trace.log" ]; then
+            tail -6 "$RUNNER_TEMP/trace.log" | while IFS= read -r l; do echo "::warning::T $l"; done
+          fi
 
       - name: 上传 artifact
         if: always()
