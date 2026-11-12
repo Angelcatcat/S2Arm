@@ -213,11 +213,13 @@ jobs:
               [ -n "$l" ] || continue
               echo "::error::nxaot: ${l}"
             done
-            for p in "$HOME"/.s2arm/run/s2arm/cache/nxaot/*/*.tmp/publish.log; do
+            for p in "$HOME"/.s2arm/run/s2arm/cache/nxaot/*.tmp/publish.log; do
               [ -f "$p" ] || continue
-              grep -a -iE 'error|not found|could not' "$p" | head -4 | cut -c1-300 | while IFS= read -r l; do
+              echo "---- ${p}"
+              grep -a -iE 'error|not found|could not|MSB[0-9]|NU[0-9]' "$p" | head -3 | cut -c1-300 | while IFS= read -r l; do
                 echo "::error::publish: ${l}"
               done
+              echo "::error::publish-tail: $(tail -8 "$p" | tr '\n' '|' | cut -c1-900)"
             done
             exit 1
           fi
@@ -254,8 +256,8 @@ jobs:
           set -uo pipefail
           shopt -s nullglob
           FOUND=0
-          for f in "$HOME"/.s2arm/run/s2arm/cache/nxaot/*/*.tmp/publish.log \
-                   "$HOME"/.s2arm/run/s2arm/cache/nxaot/*/*/publish.log; do
+          for f in "$HOME"/.s2arm/run/s2arm/cache/nxaot/*.tmp/publish.log \
+                   "$HOME"/.s2arm/run/s2arm/cache/nxaot/*/publish.log; do
             FOUND=1
             echo "===== $f"
             grep -a -iE 'error|not found|失败|MSB[0-9]+|NU[0-9]+|could not' "$f" | head -5 | cut -c1-260 | while IFS= read -r line; do
