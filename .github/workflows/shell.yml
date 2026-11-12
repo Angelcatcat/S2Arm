@@ -17,11 +17,6 @@ name: Build iOS shell
 
 on:
   workflow_dispatch:
-    inputs:
-      patch_sdk_major:
-        description: '本机 SDK 大版本与 toolchain.env 不一致时，改 env 并本地提交后继续（产物只适配同大版本 SDK 的机器）'
-        type: boolean
-        default: false
   push:
     branches: [master, main]
     paths:
@@ -114,20 +109,17 @@ jobs:
           MAJOR=${SDKV%%.*}
 
           WANT=$(awk -F= '$1 == "IPHONEOS_SDK_MAJOR" { print $2 }' tools/toolchain.env)
-          echo "runner iOS SDK=$SDKV（主版本 $MAJOR），tools/toolchain.env 要求 $WANT"
+          echo "SDK_ACTUAL=$SDKV" >> "$GITHUB_ENV"
+          echo "runner iOS SDK=$SDKV（主版本 $MAJOR），tools/toolchain.env 里是 $WANT"
 
+          # 壳编号记的是「实际链接用的 SDK 主版本」，所以以 runner 为准对齐：
+          # 不一致就改 toolchain.env 并本地提交（只为过 shell_build.sh:17 的门禁，提交不出这个 runner）。
+          # 产出的壳 iosSdk=$MAJOR —— 出包机的 tools/toolchain.env 也必须同步成 $MAJOR，否则装配时壳编号对不上。
           if [ "$MAJOR" != "$WANT" ]; then
-            if [ "${PATCH_SDK_MAJOR:-false}" != "true" ]; then
-              echo "::error::SDK 主版本不符：runner=$MAJOR / toolchain.env=$WANT。三条出路：① 换一个带 iOS SDK $WANT 的 runner；② 按 workflow_dispatch 的 patch_sdk_major=true 重跑（会改 toolchain.env 并本地提交，产物只适配 $MAJOR 的机器）；③ 把 tools/toolchain.env 的 IPHONEOS_SDK_MAJOR 改成 $MAJOR 并提交（壳编号会变）"
-              exit 1
-            fi
-            echo "::warning::patch_sdk_major=true：把 IPHONEOS_SDK_MAJOR 改成 $MAJOR 并本地提交（只为让 shell_build.sh:17 的门禁通过）"
+            echo "::warning::SDK 主版本不一致（runner=$MAJOR / env=$WANT）：按 runner 对齐，壳的 iosSdk 将是 $MAJOR"
             sed -i '' "s/^IPHONEOS_SDK_MAJOR=.*/IPHONEOS_SDK_MAJOR=$MAJOR/" tools/toolchain.env
-            git -c user.name='ci' -c user.email='ci@localhost' commit -am "ci: IPHONEOS_SDK_MAJOR=$MAJOR for runner Xcode" -q
-            echo "::warning::产出的壳绑定 iOS SDK $MAJOR；别的机器用之前要确认 SDK 主版本一致"
+            git -c user.name='ci' -c user.email='ci@localhost' commit -am "ci: IPHONEOS_SDK_MAJOR=$MAJOR (runner iOS SDK $SDKV)" -q
           fi
-        env:
-          PATCH_SDK_MAJOR: ${{ inputs.patch_sdk_major && 'true' || 'false' }}
 
       - name: 补装 Metal Toolchain（缺才装）
         run: |
@@ -242,15 +234,35 @@ jobs:
           shasum -a 256 "shell-$SID.tar.gz" | tee "shell-$SID.tar.gz.sha256"
           ls -lh "shell-$SID.tar.gz"
 
+      - name: 写环境快照（失败也能取回，便于诊断）
+        if: always()
+        run: |
+          set -uo pipefail
+          E="$RUNNER_TEMP/env.txt"
+          {
+            echo "== runner =="; uname -a; sw_vers 2>/dev/null
+            echo "== Xcode =="; ls -d /Applications/Xcode*.app 2>/dev/null; xcode-select -p 2>/dev/null
+            xcodebuild -version 2>&1 | head -2
+            echo "== iOS SDK =="; echo "actual=${SDK_ACTUAL:-?}"; awk -F= '$1=="IPHONEOS_SDK_MAJOR"{print "toolchain.env="$2}' tools/toolchain.env 2>/dev/null
+            echo "== Metal =="; xcrun -sdk iphoneos metal --version 2>&1 | head -2
+            echo "== tools =="; bash --version | head -1; gmake --version 2>/dev/null | head -1
+            "${DOTNET:-dotnet}" --list-sdks 2>/dev/null | tail -3
+            echo "== disk =="; df -h / | tail -1
+            echo "== git =="; git rev-parse HEAD 2>/dev/null; git status --porcelain 2>/dev/null | head -20
+          } > "$E" 2>&1 || true
+          cat "$E"
+
       - name: 上传 artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shell-${{ env.SID }}
+          name: shell-${{ env.SID || 'none' }}
           path: |
             ${{ runner.temp }}/shell-*.tar.gz
             ${{ runner.temp }}/shell-*.tar.gz.sha256
+            ${{ runner.temp }}/env.txt
           retention-days: 14
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: 写摘要
         if: always()
@@ -262,7 +274,7 @@ jobs:
               echo "- shellId：\`$SID\`"
               echo "- artifact：\`shell-$SID\`（tar.gz，内含 \`root/\` 与 \`manifest.json\`）"
               echo "- Xcode：\`${S2A_XCODE}\`"
-              echo "- iOS SDK：$(DEVELOPER_DIR=$S2A_XCODE xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo '?')"
+              echo "- iOS SDK：\`${SDK_ACTUAL:-?}\`（壳的 iosSdk 就是这个大版本，出包机必须一致）"
               echo
               echo "### 拿到壳之后（Windows 侧）"
               echo
@@ -272,7 +284,8 @@ jobs:
               echo "   - \`<S2A_RUN_ROOT>/s2arm/cache/shell/$SID/\`"
               echo '   - 任意目录 + `set S2A_SHELL=<该目录>`'
               echo "3. 若源码树里有 \`engine.json\`，把它的 \`shellId\` 改成 \`$SID\`（pack/shell/manifest.py current_id 读它）"
+              echo "4. 出包机的 \`tools/toolchain.env\` 的 \`IPHONEOS_SDK_MAJOR\` 必须等于 \`${SDK_ACTUAL%%.*}\`，否则装配时壳编号对不上"
             else
-              echo "本次没有产出壳，见上面的步骤日志。"
+              echo "本次没有产出壳。取 artifact \`shell-none\` 里的 \`env.txt\` 看环境（Xcode / SDK / Metal / gmake / dotnet）。"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
