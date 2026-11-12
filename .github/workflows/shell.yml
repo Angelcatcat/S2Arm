@@ -146,7 +146,7 @@ jobs:
       - name: 装 GNU Make ≥ 4 与较新的 bash
         run: |
           set -euo pipefail
-          brew install make bash
+          brew install make bash meson ninja
           GM="$(command -v gmake || true)"
           [ -n "$GM" ] || GM="$(brew --prefix)/bin/gmake"
           "$GM" --version | head -1 | grep -qE 'GNU Make ([4-9]|[1-9][0-9])\.' \
@@ -246,11 +246,23 @@ jobs:
           set -uo pipefail
           OUT="$RUNNER_TEMP/shell"
           LOG="$RUNNER_TEMP/shell_build.log"
-          rm -rf "$OUT"
+          ERRS="$RUNNER_TEMP/errs"
+          rm -rf "$OUT" "$ERRS" "$RUNNER_TEMP/tmp"
+          mkdir -p "$ERRS" "$RUNNER_TEMP/tmp"
+          export TMPDIR="$RUNNER_TEMP/tmp"   # shell_build.sh 的 mktemp 落在这里
           export S2A_PY=python3
           echo "工具链：Xcode=${S2A_XCODE:-?} SDK=${SDK_ACTUAL:-?} gmake=${S2A_GMAKE:-?}"
+          # shell_build.sh 退出时 trap 会删掉临时目录；后台轮询把 build/cs/*.err 拷出来，失败时能读到第三方库的真实报错
+          ( while :; do
+              for f in "$TMPDIR"/s2a-shell.*/build/cs/*.err; do
+                [ -f "$f" ] || continue
+                cp -f "$f" "$ERRS/$(basename "$f")" 2>/dev/null || true
+              done
+              sleep 2
+            done ) & WATCH=$!
           "${BASH5:-bash}" pack/shell_build.sh "$OUT" > "$LOG" 2>&1
           RC=$?
+          kill "$WATCH" 2>/dev/null || true
           tail -40 "$LOG"
           if [ $RC -ne 0 ]; then
             # 【红】行 + 真正的编译错误都转成 ::error:: 注解（run 页匿名可见）
@@ -259,6 +271,10 @@ jobs:
             done
             grep -a -iE 'error:|\*\*\* |No such file|cannot find|not found' "$LOG" | tail -6 | cut -c1-280 | while IFS= read -r line; do
               echo "::error::tail: ${line}"
+            done
+            for f in "$ERRS"/*.err; do
+              [ -f "$f" ] || continue
+              echo "::error::$(basename "$f"): $(tail -5 "$f" | tr '\n' '|' | cut -c1-600)"
             done
             exit 1
           fi
