@@ -95,7 +95,7 @@ jobs:
           cat "$LOG"
           echo "::warning::S4a rc=$RC sdk=${S2A_TC_SDK:-none} dd=${DEVELOPER_DIR:-none}"
           if [ $RC -ne 0 ] || [ -z "${S2A_TC_SDK:-}" ] || [ -z "${DEVELOPER_DIR:-}" ]; then
-            echo "::error::工具链解析失败（rc=$RC）：$(tail -3 "$LOG" 2>/dev/null | tr '\n' ' ')"
+            echo "::error::工具链解析失败（rc=${RC}）：$(tail -3 "$LOG" 2>/dev/null | tr '\n' ' ')"
             exit 1
           fi
 
@@ -106,7 +106,7 @@ jobs:
 
           WANT=$(awk -F= '$1 == "IPHONEOS_SDK_MAJOR" { print $2 }' tools/toolchain.env)
           echo "::warning::S4b sdkv=$SDKV major=$MAJOR want=$WANT"
-          echo "runner iOS SDK=$SDKV（主版本 $MAJOR），tools/toolchain.env 里是 $WANT"
+          echo "runner iOS SDK=${SDKV}（主版本 ${MAJOR}），tools/toolchain.env 里是 ${WANT}"
 
           # 壳编号记的是「实际链接用的 SDK 主版本」。不一致就在这里报红，不做静默改写：
           # 改 toolchain.env 会换壳编号，必须由人决定并提交（出包机的 env 也得同步）。
