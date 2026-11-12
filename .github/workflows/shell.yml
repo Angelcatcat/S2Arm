@@ -204,6 +204,9 @@ jobs:
           set +e
           set -uo pipefail
           O="$RUNNER_TEMP/nxaot.out"; E="$RUNNER_TEMP/nxaot.err"
+          # nxaot.sh 的 timeout 来自仓库 tools/bin（tools/_timeout.sh 注入 PATH），单独跑必须先补
+          export PATH="$PWD/tools/bin:$PATH"
+          source tools/toolchain.sh > /dev/null 2>&1
           bash services/nxaot.sh ios-arm64 > "$O" 2> "$E"
           RC=$?
           echo "----- stderr -----"; tail -8 "$E"
