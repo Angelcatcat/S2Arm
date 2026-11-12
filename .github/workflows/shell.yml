@@ -53,6 +53,11 @@ jobs:
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_NOLOGO: '1'
+      # 仓库全树是 100644（Windows 快照 / 上游都没有执行位）。CI 里要 chmod +x 才能跑 tools/bin/timeout，
+      # 用 core.filemode=false 让 shell_build.sh:17 的 git status 门禁看不到这些模式变化（脚本自己也用这招设 core.trustctime）
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: 'core.filemode'
+      GIT_CONFIG_VALUE_0: 'false'
 
     steps:
       - name: 取源码
@@ -60,6 +65,13 @@ jobs:
         with:
           fetch-depth: 0
           submodules: false
+
+      - name: 恢复脚本执行位
+        run: |
+          set -euo pipefail
+          chmod +x tools/bin/timeout
+          find . -path ./.git -prune -o -type f \( -name '*.sh' -o -name '*.py' \) -print0 | xargs -0 chmod +x
+          ls -l tools/bin/timeout
 
       - name: 环境自检（打印，不判红）
         run: |
