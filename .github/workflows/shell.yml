@@ -80,49 +80,24 @@ jobs:
           python3 --version || true
           (dotnet --list-sdks) || echo "（PATH 里没有 dotnet）"
 
-      - name: 选 Xcode 并核 SDK 主版本
+      - name: 解析工具链并核 SDK 主版本
         run: |
-          set -uo pipefail   # 不用 -e：这里任何一步失败都要留下可读的 ::error:: / ::warning::，不许静默退出
+          set +e   # runner 默认 bash -e：这里必须关掉，任何一步失败都要留下可读的 ::error::
+          set -uo pipefail
+          LOG="$RUNNER_TEMP/tc.log"
 
-          # 从新到旧逐个试，第一个「有 iOS SDK」的 Xcode 就用它；xcode-select 切不过去也只用 DEVELOPER_DIR（xcrun/make 都认）
-          CANDIDATES=$(python3 - <<'PY'
-          import glob, re
-          def key(p):
-              nums = re.findall(r'\d+', p.rsplit('Xcode', 1)[-1])
-              return [int(n) for n in nums] or [0]
-          for p in sorted(glob.glob('/Applications/Xcode*.app'), key=key, reverse=True):
-              print(p)
-          PY
-          )
-          if [ -z "$CANDIDATES" ]; then
-            echo "::error::runner 上没有 /Applications/Xcode*.app"
+          # 用项目自己的解析器（tools/toolchain.sh：装着的 Xcode 里最新的一个，并核 iOS SDK + Metal 编译器）
+          source tools/toolchain.sh > "$LOG" 2>&1
+          RC=$?
+          cat "$LOG"
+          if [ $RC -ne 0 ] || [ -z "${S2A_TC_SDK:-}" ] || [ -z "${DEVELOPER_DIR:-}" ]; then
+            echo "::error::工具链解析失败（rc=$RC）：$(tail -3 "$LOG" 2>/dev/null | tr '\n' ' ')"
             exit 1
           fi
-          echo "候选 Xcode："; echo "$CANDIDATES"
 
-          XCODE_APP=""; SDKV=""
-          while IFS= read -r app; do
-            [ -n "$app" ] || continue
-            dd="$app/Contents/Developer"
-            [ -d "$dd" ] || { echo "跳过 $app：没有 Contents/Developer"; continue; }
-            v=$(DEVELOPER_DIR="$dd" xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || true)
-            if [ -z "$v" ]; then echo "跳过 $app：没有 iOS SDK"; continue; fi
-            XCODE_APP="$app"; SDKV="$v"; break
-          done <<< "$CANDIDATES"
-
-          if [ -z "$XCODE_APP" ]; then
-            echo "::error::所有 Xcode 都没有 iOS SDK（需要在 Xcode → Settings → Components 装 iOS 平台）"
-            exit 1
-          fi
-          DD="$XCODE_APP/Contents/Developer"
-          echo "选中 $XCODE_APP（iOS SDK $SDKV）"
-          sudo xcode-select -s "$DD" || echo "::warning::xcode-select 切换失败，仅用 DEVELOPER_DIR=$DD"
-          {
-            echo "S2A_XCODE=$DD"
-            echo "S2A_DEVELOPER_DIR=$DD"
-            echo "DEVELOPER_DIR=$DD"
-            echo "SDK_ACTUAL=$SDKV"
-          } >> "$GITHUB_ENV"
+          SDKV="$S2A_TC_SDK"
+          printf 'SDK_ACTUAL=%s\nS2A_XCODE=%s\nS2A_DEVELOPER_DIR=%s\nDEVELOPER_DIR=%s\n' \
+            "$SDKV" "$DEVELOPER_DIR" "$DEVELOPER_DIR" "$DEVELOPER_DIR" >> "$GITHUB_ENV"
           MAJOR=${SDKV%%.*}
 
           WANT=$(awk -F= '$1 == "IPHONEOS_SDK_MAJOR" { print $2 }' tools/toolchain.env)
@@ -224,12 +199,28 @@ jobs:
 
       - name: 出壳
         run: |
-          set -euo pipefail
+          set +e
+          set -uo pipefail
           OUT="$RUNNER_TEMP/shell"
+          LOG="$RUNNER_TEMP/shell_build.log"
           rm -rf "$OUT"
           export S2A_PY=python3
-          echo "工具链：Xcode=${S2A_XCODE}  SDK=$(DEVELOPER_DIR=$S2A_XCODE xcrun --sdk iphoneos --show-sdk-version)  gmake=${S2A_GMAKE}"
-          "${BASH5:-bash}" pack/shell_build.sh "$OUT"
+          echo "工具链：Xcode=${S2A_XCODE:-?} SDK=${SDK_ACTUAL:-?} gmake=${S2A_GMAKE:-?}"
+          "${BASH5:-bash}" pack/shell_build.sh "$OUT" > "$LOG" 2>&1
+          RC=$?
+          tail -40 "$LOG"
+          if [ $RC -ne 0 ]; then
+            # 【红】行转成 ::error:: 注解（run 页匿名可见），最多 4 条
+            n=0
+            while IFS= read -r line; do
+              [ -n "$line" ] || continue
+              echo "::error::shell_build: $line"
+              n=$((n+1)); [ $n -ge 4 ] && break
+            done < <(grep -a '【红】' "$LOG" | tail -4)
+            [ "$n" -eq 0 ] && echo "::error::shell_build 退出码 ${RC}：$(tail -3 "$LOG" 2>/dev/null | tr '\n' ' ')"
+            exit 1
+          fi
+          exit 0
 
       - name: 核壳并取壳编号
         run: |
@@ -290,6 +281,8 @@ jobs:
             ${{ runner.temp }}/shell-*.tar.gz
             ${{ runner.temp }}/shell-*.tar.gz.sha256
             ${{ runner.temp }}/env.txt
+            ${{ runner.temp }}/shell_build.log
+            ${{ runner.temp }}/tc.log
           retention-days: 14
           if-no-files-found: warn
 
